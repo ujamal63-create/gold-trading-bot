@@ -30,6 +30,8 @@ input bool             InpUseTrailingStop            = true;
 input double           InpTrailATRMultiplier         = 1.2;
 input int              InpSRLookbackBars             = 80;
 input double           InpSRZoneATRMultiplier        = 0.6;
+input int              InpSRWindow                   = 3;
+input double           InpSRBufferATRMultiplier      = 0.40;
 input ENUM_TIMEFRAMES  InpHTFTimeframe               = PERIOD_M5;
 input int              InpMagicNumber                = 260513;
 
@@ -69,14 +71,39 @@ bool CanOpenNewTrade(){datetime now=TimeCurrent(); if(lastTradeTime>0 && (now-la
 
 double CalculatePositionSize(double slPoints){ if(slPoints<=0.0)return 0.0; double bal=AccountInfoDouble(ACCOUNT_BALANCE), risk=bal*(InpRiskPercent/100.0); double tickValue=SymbolInfoDouble(InpSymbol,SYMBOL_TRADE_TICK_VALUE), tickSize=SymbolInfoDouble(InpSymbol,SYMBOL_TRADE_TICK_SIZE), point=SymbolInfoDouble(InpSymbol,SYMBOL_POINT); if(tickValue<=0||tickSize<=0||point<=0) return 0.0; double valuePerPointPerLot=tickValue*(point/tickSize); double lots=risk/(slPoints*valuePerPointPerLot); double minLot=SymbolInfoDouble(InpSymbol,SYMBOL_VOLUME_MIN), maxLot=SymbolInfoDouble(InpSymbol,SYMBOL_VOLUME_MAX), step=SymbolInfoDouble(InpSymbol,SYMBOL_VOLUME_STEP); lots=MathMax(minLot,MathMin(MathMin(maxLot,InpMaxLot),lots)); lots=MathFloor(lots/step)*step; return NormalizeDouble(lots,2); }
 
+bool IsSwingHigh(const double &high[], int idx, int w){ for(int k=1;k<=w;k++){ if(high[idx]<=high[idx-k] || high[idx]<=high[idx+k]) return false; } return true; }
+bool IsSwingLow(const double &low[], int idx, int w){ for(int k=1;k<=w;k++){ if(low[idx]>=low[idx-k] || low[idx]>=low[idx+k]) return false; } return true; }
+
 bool GetSupportResistance(double &support,double &resistance){
-   int bars = MathMax(20, InpSRLookbackBars);
-   int lowIdx=iLowest(InpSymbol,InpTimeframe,MODE_LOW,bars,1);
-   int highIdx=iHighest(InpSymbol,InpTimeframe,MODE_HIGH,bars,1);
-   if(lowIdx<0 || highIdx<0) return false;
-   support=iLow(InpSymbol,InpTimeframe,lowIdx);
-   resistance=iHigh(InpSymbol,InpTimeframe,highIdx);
-   return (support>0 && resistance>0 && resistance>support);
+   int bars=MathMax(25, InpSRLookbackBars);
+   int w=MathMax(1, InpSRWindow);
+
+   MqlRates rates[];
+   int copied=CopyRates(InpSymbol,InpTimeframe,0,bars,rates);
+   if(copied<(w*2+5)) return false;
+   ArraySetAsSeries(rates,true);
+
+   double highs[], lows[];
+   ArrayResize(highs,copied);
+   ArrayResize(lows,copied);
+   for(int i=0;i<copied;i++){ highs[i]=rates[i].high; lows[i]=rates[i].low; }
+
+   double mid=(SymbolInfoDouble(InpSymbol,SYMBOL_BID)+SymbolInfoDouble(InpSymbol,SYMBOL_ASK))*0.5;
+   support=0.0; resistance=0.0;
+   double bestBelowDist=DBL_MAX, bestAboveDist=DBL_MAX;
+
+   for(int i=w+1;i<copied-w-1;i++){
+      if(IsSwingLow(lows,i,w)){
+         double lv=lows[i];
+         if(lv<mid){ double d=mid-lv; if(d<bestBelowDist){ bestBelowDist=d; support=lv; }}
+      }
+      if(IsSwingHigh(highs,i,w)){
+         double lv=highs[i];
+         if(lv>mid){ double d=lv-mid; if(d<bestAboveDist){ bestAboveDist=d; resistance=lv; }}
+      }
+   }
+
+   return (support>0.0 || resistance>0.0);
 }
 
 bool IsNearLevel(double price,double level,double zone){ return MathAbs(price-level)<=zone; }
@@ -113,12 +140,17 @@ TrendDirection GetSignal(){
    double atr=GetATRValue(); if(atr<=0) return TREND_NONE;
    double zone=atr*InpSRZoneATRMultiplier;
    double close1=iClose(InpSymbol,InpTimeframe,1);
+   double mid=(SymbolInfoDouble(InpSymbol,SYMBOL_BID)+SymbolInfoDouble(InpSymbol,SYMBOL_ASK))*0.5;
+   double srBuffer=atr*InpSRBufferATRMultiplier;
 
    bool trendBuy=(adx[0]>=InpADXTrendThreshold && f[0]>s[0] && pdi[0]>mdi[0] && r[0]>=InpRSIBuyThreshold && htfBias!=TREND_SELL);
    bool trendSell=(adx[0]>=InpADXTrendThreshold && f[0]<s[0] && mdi[0]>pdi[0] && r[0]<=InpRSISellThreshold && htfBias!=TREND_BUY);
 
-   bool srBuy = IsNearLevel(close1,support,zone) && IsBullishRejection() && htfBias!=TREND_SELL;
-   bool srSell = IsNearLevel(close1,resistance,zone) && IsBearishRejection() && htfBias!=TREND_BUY;
+   bool nearSupport=(support>0.0 && (IsNearLevel(close1,support,zone) || MathAbs(mid-support)<=srBuffer));
+   bool nearResistance=(resistance>0.0 && (IsNearLevel(close1,resistance,zone) || MathAbs(mid-resistance)<=srBuffer));
+
+   bool srBuy = nearSupport && IsBullishRejection() && htfBias!=TREND_SELL;
+   bool srSell = nearResistance && IsBearishRejection() && htfBias!=TREND_BUY;
 
    if(trendBuy || srBuy) return TREND_BUY;
    if(trendSell || srSell) return TREND_SELL;
