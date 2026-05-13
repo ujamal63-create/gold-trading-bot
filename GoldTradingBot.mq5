@@ -34,6 +34,7 @@ input ENUM_TIMEFRAMES  InpHTFTimeframe               = PERIOD_M5;
 input int              InpMagicNumber                = 260513;
 
 int fastHandle = INVALID_HANDLE, slowHandle = INVALID_HANDLE, rsiHandle = INVALID_HANDLE, adxHandle = INVALID_HANDLE, atrHandle = INVALID_HANDLE;
+int htfFastHandle = INVALID_HANDLE, htfSlowHandle = INVALID_HANDLE;
 datetime lastBarTime = 0, lastTradeTime = 0;
 datetime tradeTimes[];
 
@@ -43,7 +44,9 @@ int OnInit(){
    rsiHandle=iRSI(InpSymbol,InpTimeframe,InpRSIPeriod,PRICE_CLOSE);
    adxHandle=iADX(InpSymbol,InpTimeframe,InpADXPeriod);
    atrHandle=iATR(InpSymbol,InpTimeframe,InpATRPeriod);
-   if(fastHandle==INVALID_HANDLE||slowHandle==INVALID_HANDLE||rsiHandle==INVALID_HANDLE||adxHandle==INVALID_HANDLE||atrHandle==INVALID_HANDLE) return INIT_FAILED;
+   htfFastHandle=iMA(InpSymbol,InpHTFTimeframe,InpFastEMA,0,MODE_EMA,PRICE_CLOSE);
+   htfSlowHandle=iMA(InpSymbol,InpHTFTimeframe,InpSlowEMA,0,MODE_EMA,PRICE_CLOSE);
+   if(fastHandle==INVALID_HANDLE||slowHandle==INVALID_HANDLE||rsiHandle==INVALID_HANDLE||adxHandle==INVALID_HANDLE||atrHandle==INVALID_HANDLE||htfFastHandle==INVALID_HANDLE||htfSlowHandle==INVALID_HANDLE) return INIT_FAILED;
    trade.SetExpertMagicNumber(InpMagicNumber);
    return INIT_SUCCEEDED;
 }
@@ -54,6 +57,8 @@ void OnDeinit(const int reason){
    if(rsiHandle!=INVALID_HANDLE)IndicatorRelease(rsiHandle);
    if(adxHandle!=INVALID_HANDLE)IndicatorRelease(adxHandle);
    if(atrHandle!=INVALID_HANDLE)IndicatorRelease(atrHandle);
+   if(htfFastHandle!=INVALID_HANDLE)IndicatorRelease(htfFastHandle);
+   if(htfSlowHandle!=INVALID_HANDLE)IndicatorRelease(htfSlowHandle);
 }
 
 bool HasOpenPosition(){for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i); if(t==0||!PositionSelectByTicket(t))continue; if(PositionGetString(POSITION_SYMBOL)==InpSymbol && PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)return true;} return false;}
@@ -89,11 +94,11 @@ bool IsBearishRejection(){
 }
 
 TrendDirection GetHigherTimeframeBias(){
-   double htfFast=iMA(InpSymbol,InpHTFTimeframe,InpFastEMA,0,MODE_EMA,PRICE_CLOSE,1);
-   double htfSlow=iMA(InpSymbol,InpHTFTimeframe,InpSlowEMA,0,MODE_EMA,PRICE_CLOSE,1);
-   if(htfFast==0 || htfSlow==0) return TREND_NONE;
-   if(htfFast>htfSlow) return TREND_BUY;
-   if(htfFast<htfSlow) return TREND_SELL;
+   double htfFast[2], htfSlow[2];
+   if(CopyBuffer(htfFastHandle,0,1,2,htfFast)<2) return TREND_NONE;
+   if(CopyBuffer(htfSlowHandle,0,1,2,htfSlow)<2) return TREND_NONE;
+   if(htfFast[0]>htfSlow[0]) return TREND_BUY;
+   if(htfFast[0]<htfSlow[0]) return TREND_SELL;
    return TREND_NONE;
 }
 
