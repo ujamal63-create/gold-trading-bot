@@ -91,6 +91,21 @@ void OnDeinit(const int reason){ if(fastHandle!=INVALID_HANDLE)IndicatorRelease(
 
 double GetATR(){ double a[2]; if(CopyBuffer(atrHandle,0,0,2,a)<2) return 0.0; return a[0]; }
 
+void CleanupTradeTimes(){
+   datetime now=TimeCurrent();
+   datetime keep[];
+   ArrayResize(keep,0);
+   for(int i=0;i<ArraySize(tradeTimes);i++){
+      if((now-tradeTimes[i])<=86400){
+         int n=ArraySize(keep);
+         ArrayResize(keep,n+1);
+         keep[n]=tradeTimes[i];
+      }
+   }
+   ArrayResize(tradeTimes,ArraySize(keep));
+   ArrayCopy(tradeTimes,keep,0,0,WHOLE_ARRAY);
+}
+
 bool IsSwingHigh(const double &h[],int idx,int w){ for(int k=1;k<=w;k++) if(h[idx]<=h[idx-k] || h[idx]<=h[idx+k]) return false; return true; }
 bool IsSwingLow(const double &l[],int idx,int w){ for(int k=1;k<=w;k++) if(l[idx]>=l[idx-k] || l[idx]>=l[idx+k]) return false; return true; }
 
