@@ -100,11 +100,16 @@ bool BuildSR(double &support,double &resistance,int &supStrength,int &resStrengt
    double atr=GetATR(); if(atr<=0) return false; zoneWidth=atr*InpSRZoneATRMultiplier;
    double mid=(SymbolInfoDouble(InpSymbol,SYMBOL_BID)+SymbolInfoDouble(InpSymbol,SYMBOL_ASK))*0.5;
 
+   double highs[], lows[];
+   ArrayResize(highs,copied);
+   ArrayResize(lows,copied);
+   for(int j=0;j<copied;j++){ highs[j]=rates[j].high; lows[j]=rates[j].low; }
+
    double zonePrice[40]; int zoneTouch[40]; int zoneReject[40]; bool zoneSup[40]; int zones=0;
    for(int i=InpSRWindow+2;i<copied-InpSRWindow-2;i++){
-      bool sl=IsSwingLow((double&)rates.low,i,InpSRWindow), sh=IsSwingHigh((double&)rates.high,i,InpSRWindow);
+      bool sl=IsSwingLow(lows,i,InpSRWindow), sh=IsSwingHigh(highs,i,InpSRWindow);
       if(!sl && !sh) continue;
-      double p=sl?rates[i].low:rates[i].high; bool isSup=sl; int f=-1;
+      double p=sl?lows[i]:highs[i]; bool isSup=sl; int f=-1;
       for(int z=0;z<zones;z++) if(zoneSup[z]==isSup && MathAbs(zonePrice[z]-p)<=zoneWidth){f=z;break;}
       if(f<0 && zones<40){f=zones; zonePrice[f]=p; zoneTouch[f]=0; zoneReject[f]=0; zoneSup[f]=isSup; zones++;}
       zoneTouch[f]++;
