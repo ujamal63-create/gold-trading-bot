@@ -1,249 +1,663 @@
 #property copyright "gold-trading-bot"
-#property version   "2.30"
+#property version   "3.00"
 #property strict
+#property description "Gold Hedged Range Strategy: M15 swing levels, M5 indicator confirmation, M1 trigger execution."
 
 #include <Trade/Trade.mqh>
 
 CTrade trade;
 
-enum TrendDirection { TREND_NONE=0, TREND_BUY=1, TREND_SELL=-1 };
-enum MarketRegime { REGIME_CHOPPY=0, REGIME_MODERATE=1, REGIME_STRONG=2 };
+enum LotSizingMode
+{
+   LOT_FIXED = 0,
+   LOT_EQUITY_RISK = 1
+};
 
-input string           InpSymbol                      = "XAUUSD";
-input ENUM_TIMEFRAMES  InpTimeframe                   = PERIOD_M1;
-input bool             InpUseAIConfirmation           = true;
-input bool             InpStrongTrendIgnoresSR        = true;
-input bool             InpConsolidationSROnly         = true;
-input bool             InpDebugMode                   = true;
+input string          InpSymbol                   = "XAUUSD";
+input ulong           InpMagicNumber              = 260513;
+input bool            InpDebugMode                = true;
+input bool            InpWriteCsvLog              = true;
+input int             InpDeviationPoints          = 30;
 
-input int              InpFastEMA                     = 9;
-input int              InpSlowEMA                     = 26;
-input int              InpRSIPeriod                   = 14;
-input int              InpADXPeriod                   = 14;
-input int              InpATRPeriod                   = 14;
+input int             InpSwingWindow              = 3;
+input int             InpSwingLookbackBars        = 220;
+input double          InpSwingLowBufferATR        = 0.35;
+input double          InpSwingHighBufferATR       = 0.50;
+input double          InpMinATR                   = 1.00;
 
-input double           InpRiskPercent                 = 0.30;
-input double           InpMaxLot                      = 0.02;
-input int              InpMaxOpenPositions            = 1;
-input bool             InpEnableHighConfidenceScaleIn = false;
-input int              InpScaleInMinConfidence        = 92;
-input int              InpScaleInMaxPositions         = 2;
+input int             InpRSIPeriod                = 14;
+input double          InpRSIOversold              = 35.0;
+input double          InpRSISwingHigh             = 60.0;
+input int             InpStochKPeriod             = 5;
+input int             InpStochDPeriod             = 3;
+input int             InpStochSlowing             = 3;
+input int             InpFastEMA                  = 8;
+input int             InpSlowEMA                  = 21;
+input int             InpATRPeriod                = 14;
+input int             InpBandsPeriod              = 20;
+input double          InpBandsDeviation           = 2.0;
+input double          InpBandTouchBufferATR       = 0.10;
+input bool            InpRequireVwapConfluence    = false;
+input bool            InpRequireLowerBandTouch    = true;
+input bool            InpRequireUpperBandAdd      = false;
 
-input double           InpATRSLMultiplier             = 1.0;
-input double           InpATRTPMultiplier             = 1.2;
-input bool             InpUseTrailingStop             = true;
-input double           InpTrailATRMultiplier          = 1.0;
-input bool             InpUseBreakEven                = true;
-input double           InpBreakEvenATRMultiplier      = 0.8;
+input LotSizingMode   InpLotSizingMode            = LOT_FIXED;
+input double          InpFixedLot                 = 0.01;
+input double          InpRiskPercent              = 0.30;
+input double          InpEmergencyStopATR         = 2.0;
+input double          InpMaxLot                   = 0.10;
+input int             InpMaxSimultaneousPositions = 6;
+input int             InpMaxShortAddsPerCycle     = 2;
+input int             InpMinSecondsBetweenEntries = 60;
+input double          InpMaxSpreadPoints          = 80;
+input double          InpNetCloseProfitMoney      = 0.00;
+input double          InpLongQuickProfitMoney     = 0.01;
+input bool            InpUseSellLimitAtSwingHigh  = false;
+input int             InpPendingExpiryMinutes     = 180;
 
-input int              InpMaxTradesPerHour            = 30;
-input int              InpMaxTradesPerDay             = 1000;
-input int              InpMinSecondsBetweenTrades     = 4;
-input int              InpMinBarsBetweenTrades        = 1;
-input double           InpMaxSpreadPoints             = 60;
+int rsiM5Handle = INVALID_HANDLE;
+int stochM5Handle = INVALID_HANDLE;
+int fastEmaM5Handle = INVALID_HANDLE;
+int slowEmaM5Handle = INVALID_HANDLE;
+int atrM15Handle = INVALID_HANDLE;
+int bandsM5Handle = INVALID_HANDLE;
 
-input int              InpSRLookbackBars              = 220;
-input int              InpSRWindow                    = 3;
-input double           InpSRZoneATRMultiplier         = 0.35;
-input int              InpSRMinimumTouches            = 3;
-input int              InpBreakoutConfirmCandles      = 2;
+datetime lastM1BarTime = 0;
+datetime lastM15BarTime = 0;
+datetime lastEntryTime = 0;
+datetime lastSwingHighAddBar = 0;
+datetime lastDecisionLogBar = 0;
+string lastDecisionMessage = "";
 
-input double           InpADXConsolidationThreshold   = 14.0;
-input double           InpADXTrendThreshold           = 20.0;
-input double           InpADXVeryStrongThreshold      = 30.0;
-input int              InpMinAIConfidenceToTrade      = 60;
-input int              InpMinAIConfidenceIgnoreSR     = 80;
-input int              InpStrongTrendDirectionScore   = 85;
-input int              InpMagicNumber                 = 260513;
+double lastSwingLow = 0.0;
+double lastSwingHigh = 0.0;
+datetime lastSwingLowTime = 0;
+datetime lastSwingHighTime = 0;
+int shortAddsThisCycle = 0;
+bool cycleActive = false;
 
-int fastHandle=INVALID_HANDLE, slowHandle=INVALID_HANDLE, rsiHandle=INVALID_HANDLE, adxHandle=INVALID_HANDLE, atrHandle=INVALID_HANDLE;
-int htfFastHandle=INVALID_HANDLE, htfSlowHandle=INVALID_HANDLE;
-datetime lastBarTime=0, lastTradeTime=0, lastDecisionLogTime=0;
-datetime tradeTimes[];
-int lastTradeBarShift=9999;
-string lastDecisionMessage="";
+void LogDecision(const string message)
+{
+   if(!InpDebugMode)
+      return;
 
-void LogOncePerDecision(string msg){
-   if(!InpDebugMode) return;
-   datetime nowBar=iTime(InpSymbol,InpTimeframe,0);
-   if(msg!=lastDecisionMessage || nowBar!=lastDecisionLogTime){
-      Print(msg);
-      lastDecisionMessage=msg;
-      lastDecisionLogTime=nowBar;
+   datetime bar = iTime(InpSymbol, PERIOD_M1, 0);
+   if(message != lastDecisionMessage || bar != lastDecisionLogBar)
+   {
+      Print(message);
+      lastDecisionMessage = message;
+      lastDecisionLogBar = bar;
    }
 }
 
-int OnInit(){
-   fastHandle=iMA(InpSymbol,InpTimeframe,InpFastEMA,0,MODE_EMA,PRICE_CLOSE);
-   slowHandle=iMA(InpSymbol,InpTimeframe,InpSlowEMA,0,MODE_EMA,PRICE_CLOSE);
-   rsiHandle=iRSI(InpSymbol,InpTimeframe,InpRSIPeriod,PRICE_CLOSE);
-   adxHandle=iADX(InpSymbol,InpTimeframe,InpADXPeriod);
-   atrHandle=iATR(InpSymbol,InpTimeframe,InpATRPeriod);
-   htfFastHandle=iMA(InpSymbol,PERIOD_M5,InpFastEMA,0,MODE_EMA,PRICE_CLOSE);
-   htfSlowHandle=iMA(InpSymbol,PERIOD_M5,InpSlowEMA,0,MODE_EMA,PRICE_CLOSE);
-   if(fastHandle==INVALID_HANDLE||slowHandle==INVALID_HANDLE||rsiHandle==INVALID_HANDLE||adxHandle==INVALID_HANDLE||atrHandle==INVALID_HANDLE||htfFastHandle==INVALID_HANDLE||htfSlowHandle==INVALID_HANDLE) return INIT_FAILED;
+void TradeLog(const string eventName,
+              const string reason,
+              const double price,
+              const double volume,
+              const double rsi,
+              const double stochK,
+              const double stochD,
+              const double emaFast,
+              const double emaSlow,
+              const double atr,
+              const double vwap,
+              const double bandLower,
+              const double bandUpper)
+{
+   string line = StringFormat("%s | %s | %s | price=%.5f lot=%.2f RSI=%.2f StochK=%.2f StochD=%.2f EMA%d=%.5f EMA%d=%.5f ATR=%.5f VWAP=%.5f BB_L=%.5f BB_U=%.5f swingLow=%.5f swingHigh=%.5f",
+                              TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), eventName, reason, price, volume,
+                              rsi, stochK, stochD, InpFastEMA, emaFast, InpSlowEMA, emaSlow, atr, vwap, bandLower, bandUpper,
+                              lastSwingLow, lastSwingHigh);
+   Print(line);
+
+   if(!InpWriteCsvLog)
+      return;
+
+   int handle = FileOpen("GoldTradingBot_HedgedRange_Log.csv", FILE_READ|FILE_WRITE|FILE_CSV|FILE_COMMON|FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+      return;
+
+   if(FileSize(handle) == 0)
+      FileWrite(handle, "timestamp", "event", "reason", "price", "lot", "rsi", "stoch_k", "stoch_d", "ema_fast", "ema_slow", "atr", "vwap", "bb_lower", "bb_upper", "swing_low", "swing_high");
+
+   FileSeek(handle, 0, SEEK_END);
+   FileWrite(handle,
+             TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), eventName, reason,
+             DoubleToString(price, _Digits), DoubleToString(volume, 2), DoubleToString(rsi, 2), DoubleToString(stochK, 2), DoubleToString(stochD, 2),
+             DoubleToString(emaFast, _Digits), DoubleToString(emaSlow, _Digits), DoubleToString(atr, _Digits), DoubleToString(vwap, _Digits),
+             DoubleToString(bandLower, _Digits), DoubleToString(bandUpper, _Digits), DoubleToString(lastSwingLow, _Digits), DoubleToString(lastSwingHigh, _Digits));
+   FileClose(handle);
+}
+
+int OnInit()
+{
+   if(!SymbolSelect(InpSymbol, true))
+   {
+      Print("Failed to select symbol ", InpSymbol);
+      return INIT_FAILED;
+   }
+
+   rsiM5Handle = iRSI(InpSymbol, PERIOD_M5, InpRSIPeriod, PRICE_CLOSE);
+   stochM5Handle = iStochastic(InpSymbol, PERIOD_M5, InpStochKPeriod, InpStochDPeriod, InpStochSlowing, MODE_SMA, STO_LOWHIGH);
+   fastEmaM5Handle = iMA(InpSymbol, PERIOD_M5, InpFastEMA, 0, MODE_EMA, PRICE_CLOSE);
+   slowEmaM5Handle = iMA(InpSymbol, PERIOD_M5, InpSlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+   atrM15Handle = iATR(InpSymbol, PERIOD_M15, InpATRPeriod);
+   bandsM5Handle = iBands(InpSymbol, PERIOD_M5, InpBandsPeriod, 0, InpBandsDeviation, PRICE_CLOSE);
+
+   if(rsiM5Handle == INVALID_HANDLE || stochM5Handle == INVALID_HANDLE || fastEmaM5Handle == INVALID_HANDLE ||
+      slowEmaM5Handle == INVALID_HANDLE || atrM15Handle == INVALID_HANDLE || bandsM5Handle == INVALID_HANDLE)
+   {
+      Print("Failed to create one or more indicator handles. LastError=", GetLastError());
+      return INIT_FAILED;
+   }
+
    trade.SetExpertMagicNumber(InpMagicNumber);
-   LogOncePerDecision("GoldTradingBot v2.30 started for "+InpSymbol+" on M1. Backtest/demo first; no profit guarantee.");
+   trade.SetDeviationInPoints(InpDeviationPoints);
+   RecalculateM15Swings(true);
+   Print("GoldTradingBot v3.00 Hedged Range Strategy started for ", InpSymbol, ". Demo/backtest first; no profit guarantee.");
    return INIT_SUCCEEDED;
 }
 
-void OnDeinit(const int reason){ if(fastHandle!=INVALID_HANDLE)IndicatorRelease(fastHandle); if(slowHandle!=INVALID_HANDLE)IndicatorRelease(slowHandle); if(rsiHandle!=INVALID_HANDLE)IndicatorRelease(rsiHandle); if(adxHandle!=INVALID_HANDLE)IndicatorRelease(adxHandle); if(atrHandle!=INVALID_HANDLE)IndicatorRelease(atrHandle); if(htfFastHandle!=INVALID_HANDLE)IndicatorRelease(htfFastHandle); if(htfSlowHandle!=INVALID_HANDLE)IndicatorRelease(htfSlowHandle); }
-
-double GetATR(){ double a[2]; if(CopyBuffer(atrHandle,0,0,2,a)<2) return 0.0; return a[0]; }
-
-void CleanupTradeTimes(){
-   datetime now=TimeCurrent();
-   datetime keep[];
-   ArrayResize(keep,0);
-   for(int i=0;i<ArraySize(tradeTimes);i++){
-      if((now-tradeTimes[i])<=86400){
-         int n=ArraySize(keep);
-         ArrayResize(keep,n+1);
-         keep[n]=tradeTimes[i];
-      }
-   }
-   ArrayResize(tradeTimes,ArraySize(keep));
-   ArrayCopy(tradeTimes,keep,0,0,WHOLE_ARRAY);
+void OnDeinit(const int reason)
+{
+   if(rsiM5Handle != INVALID_HANDLE) IndicatorRelease(rsiM5Handle);
+   if(stochM5Handle != INVALID_HANDLE) IndicatorRelease(stochM5Handle);
+   if(fastEmaM5Handle != INVALID_HANDLE) IndicatorRelease(fastEmaM5Handle);
+   if(slowEmaM5Handle != INVALID_HANDLE) IndicatorRelease(slowEmaM5Handle);
+   if(atrM15Handle != INVALID_HANDLE) IndicatorRelease(atrM15Handle);
+   if(bandsM5Handle != INVALID_HANDLE) IndicatorRelease(bandsM5Handle);
 }
 
-bool IsSwingHigh(const double &h[],int idx,int w){ for(int k=1;k<=w;k++) if(h[idx]<=h[idx-k] || h[idx]<=h[idx+k]) return false; return true; }
-bool IsSwingLow(const double &l[],int idx,int w){ for(int k=1;k<=w;k++) if(l[idx]>=l[idx-k] || l[idx]>=l[idx+k]) return false; return true; }
-
-bool BuildSR(double &support,double &resistance,int &supStrength,int &resStrength,double &zoneWidth){
-   MqlRates rates[]; int bars=MathMax(80,InpSRLookbackBars); int copied=CopyRates(InpSymbol,InpTimeframe,0,bars,rates); if(copied<40) return false;
-   ArraySetAsSeries(rates,true);
-   double atr=GetATR(); if(atr<=0) return false; zoneWidth=atr*InpSRZoneATRMultiplier;
-   double mid=(SymbolInfoDouble(InpSymbol,SYMBOL_BID)+SymbolInfoDouble(InpSymbol,SYMBOL_ASK))*0.5;
-
-   double highs[], lows[];
-   ArrayResize(highs,copied);
-   ArrayResize(lows,copied);
-   for(int j=0;j<copied;j++){ highs[j]=rates[j].high; lows[j]=rates[j].low; }
-
-   double zonePrice[40]; int zoneTouch[40]; int zoneReject[40]; bool zoneSup[40]; int zones=0;
-   for(int i=InpSRWindow+2;i<copied-InpSRWindow-2;i++){
-      bool sl=IsSwingLow(lows,i,InpSRWindow), sh=IsSwingHigh(highs,i,InpSRWindow);
-      if(!sl && !sh) continue;
-      double p=sl?lows[i]:highs[i]; bool isSup=sl; int f=-1;
-      for(int z=0;z<zones;z++) if(zoneSup[z]==isSup && MathAbs(zonePrice[z]-p)<=zoneWidth){f=z;break;}
-      if(f<0 && zones<40){f=zones; zonePrice[f]=p; zoneTouch[f]=0; zoneReject[f]=0; zoneSup[f]=isSup; zones++;}
-      zoneTouch[f]++;
-      double b=MathAbs(rates[i].close-rates[i].open), lw=MathMin(rates[i].open,rates[i].close)-rates[i].low, uw=rates[i].high-MathMax(rates[i].open,rates[i].close);
-      if(isSup && lw>b*1.2) zoneReject[f]++; if(!isSup && uw>b*1.2) zoneReject[f]++;
-   }
-   support=0; resistance=0; supStrength=0; resStrength=0; double bestSup=DBL_MAX, bestRes=DBL_MAX;
-   for(int z=0;z<zones;z++){
-      if(zoneTouch[z]<InpSRMinimumTouches) continue;
-      int st=zoneTouch[z]+zoneReject[z];
-      if(zoneSup[z] && zonePrice[z]<mid){ double d=mid-zonePrice[z]; if(d<bestSup){bestSup=d; support=zonePrice[z]; supStrength=st;}}
-      if(!zoneSup[z] && zonePrice[z]>mid){ double d=zonePrice[z]-mid; if(d<bestRes){bestRes=d; resistance=zonePrice[z]; resStrength=st;}}
-   }
-   return (support>0 || resistance>0);
+bool CopySeriesValue(const int handle, const int buffer, const int start, const int count, double &values[])
+{
+   ArraySetAsSeries(values, true);
+   return CopyBuffer(handle, buffer, start, count, values) >= count;
 }
 
-int ClampScore(int s){ if(s<0) return 0; if(s>100) return 100; return s; }
+bool GetIndicatorSnapshot(double &rsi,
+                          double &stochK0,
+                          double &stochD0,
+                          double &stochK1,
+                          double &stochD1,
+                          double &emaFast0,
+                          double &emaFast1,
+                          double &emaSlow0,
+                          double &emaSlow1,
+                          double &atr,
+                          double &bandUpper,
+                          double &bandLower)
+{
+   double rsiValues[], stochKValues[], stochDValues[], emaFastValues[], emaSlowValues[], atrValues[], bandUpperValues[], bandLowerValues[];
 
-int ComputeAIConfidence(TrendDirection &dirOut, MarketRegime &regimeOut, string &reason, double support, double resistance, double zone){
-   double f[4],s[4],rsi[3],adx[3],pdi[3],mdi[3],atr[3];
-   if(CopyBuffer(fastHandle,0,0,4,f)<4||CopyBuffer(slowHandle,0,0,4,s)<4||CopyBuffer(rsiHandle,0,0,3,rsi)<3||CopyBuffer(adxHandle,0,0,3,adx)<3||CopyBuffer(adxHandle,1,0,3,pdi)<3||CopyBuffer(adxHandle,2,0,3,mdi)<3||CopyBuffer(atrHandle,0,0,3,atr)<3){reason="indicator data unavailable"; return 0;}
-   double mid=(SymbolInfoDouble(InpSymbol,SYMBOL_BID)+SymbolInfoDouble(InpSymbol,SYMBOL_ASK))*0.5;
-   bool nearSup=(support>0 && MathAbs(mid-support)<=zone), nearRes=(resistance>0 && MathAbs(mid-resistance)<=zone);
-   bool bull=iClose(InpSymbol,InpTimeframe,1)>iOpen(InpSymbol,InpTimeframe,1), bear=!bull;
-   bool atrExp=atr[0]>atr[1]*1.02;
-   bool emaUp=f[0]>s[0], emaDn=f[0]<s[0];
-   double sep=MathAbs(f[0]-s[0])/(atr[0]+0.0000001);
+   if(!CopySeriesValue(rsiM5Handle, 0, 0, 3, rsiValues)) return false;
+   if(!CopySeriesValue(stochM5Handle, 0, 0, 3, stochKValues)) return false;
+   if(!CopySeriesValue(stochM5Handle, 1, 0, 3, stochDValues)) return false;
+   if(!CopySeriesValue(fastEmaM5Handle, 0, 0, 4, emaFastValues)) return false;
+   if(!CopySeriesValue(slowEmaM5Handle, 0, 0, 4, emaSlowValues)) return false;
+   if(!CopySeriesValue(atrM15Handle, 0, 0, 3, atrValues)) return false;
+   if(!CopySeriesValue(bandsM5Handle, 1, 0, 3, bandUpperValues)) return false;
+   if(!CopySeriesValue(bandsM5Handle, 2, 0, 3, bandLowerValues)) return false;
 
-   int buy=0,sell=0;
-   if(emaUp) buy+=12; if(emaDn) sell+=12;
-   if((f[0]-f[3])>0) buy+=10; if((f[0]-f[3])<0) sell+=10;
-   if(sep>0.20){ buy+=8; sell+=8; }
-   if(adx[0]>InpADXTrendThreshold){ buy+=8; sell+=8; }
-   if(adx[0]>adx[1]){ buy+=6; sell+=6; }
-   if(pdi[0]>mdi[0]) buy+=10; if(mdi[0]>pdi[0]) sell+=10;
-   if(rsi[0]>52) buy+=8; if(rsi[0]<48) sell+=8;
-   if(bull) buy+=6; if(bear) sell+=6;
-   if(atrExp){ buy+=6; sell+=6; }
-   long tv=iVolume(InpSymbol,InpTimeframe,1), tvp=iVolume(InpSymbol,InpTimeframe,2); if(tvp>0 && tv>tvp){ buy+=4; sell+=4; }
-   if(iHigh(InpSymbol,InpTimeframe,1)>iHigh(InpSymbol,InpTimeframe,2) && iLow(InpSymbol,InpTimeframe,1)>iLow(InpSymbol,InpTimeframe,2)) buy+=8;
-   if(iHigh(InpSymbol,InpTimeframe,1)<iHigh(InpSymbol,InpTimeframe,2) && iLow(InpSymbol,InpTimeframe,1)<iLow(InpSymbol,InpTimeframe,2)) sell+=8;
-   if(nearSup) buy+=7; if(nearRes) sell+=7;
-
-   bool breakRetestBuy=false, breakRetestSell=false;
-   if(resistance>0){ breakRetestBuy=true; for(int i=InpBreakoutConfirmCandles+1;i>=2;i--) if(iClose(InpSymbol,InpTimeframe,i)<=resistance+zone*0.2) breakRetestBuy=false; if(!(iLow(InpSymbol,InpTimeframe,1)<=resistance+zone && iClose(InpSymbol,InpTimeframe,1)>resistance)) breakRetestBuy=false; }
-   if(support>0){ breakRetestSell=true; for(int i=InpBreakoutConfirmCandles+1;i>=2;i--) if(iClose(InpSymbol,InpTimeframe,i)>=support-zone*0.2) breakRetestSell=false; if(!(iHigh(InpSymbol,InpTimeframe,1)>=support-zone && iClose(InpSymbol,InpTimeframe,1)<support)) breakRetestSell=false; }
-   if(breakRetestBuy) buy+=10; if(breakRetestSell) sell+=10;
-
-   int ai=ClampScore(MathMax(buy,sell));
-   dirOut=(buy>=sell)?TREND_BUY:TREND_SELL;
-   if(adx[0]>=InpADXVeryStrongThreshold && adx[0]>adx[1] && sep>0.25 && ai>=InpMinAIConfidenceIgnoreSR) regimeOut=REGIME_STRONG;
-   else if(adx[0]>=InpADXConsolidationThreshold) regimeOut=REGIME_MODERATE;
-   else regimeOut=REGIME_CHOPPY;
-
-   reason="AI="+IntegerToString(ai)+" buyScore="+IntegerToString(buy)+" sellScore="+IntegerToString(sell);
-   return ai;
-}
-
-int CountOpenPositions(){ int c=0; for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t==0||!PositionSelectByTicket(t)) continue; if(PositionGetString(POSITION_SYMBOL)==InpSymbol&&PositionGetInteger(POSITION_MAGIC)==InpMagicNumber) c++; } return c; }
-
-bool CanOpenTrade(){
-   double spread=(SymbolInfoDouble(InpSymbol,SYMBOL_ASK)-SymbolInfoDouble(InpSymbol,SYMBOL_BID))/SymbolInfoDouble(InpSymbol,SYMBOL_POINT);
-   if(spread>InpMaxSpreadPoints){ LogOncePerDecision("No trade: spread too high"); return false; }
-   datetime now=TimeCurrent(); if(lastTradeTime>0 && (now-lastTradeTime)<InpMinSecondsBetweenTrades){ LogOncePerDecision("No trade: cooldown seconds"); return false; }
-   if(lastTradeBarShift<InpMinBarsBetweenTrades){ LogOncePerDecision("No trade: cooldown bars"); return false; }
-   int h=0,d=0; for(int i=ArraySize(tradeTimes)-1;i>=0;i--){ long age=now-tradeTimes[i]; if(age<=3600)h++; if(age<=86400)d++; }
-   if(h>=InpMaxTradesPerHour||d>=InpMaxTradesPerDay){ LogOncePerDecision("No trade: hourly/day cap"); return false; }
+   rsi = rsiValues[1];
+   stochK0 = stochKValues[1];
+   stochD0 = stochDValues[1];
+   stochK1 = stochKValues[2];
+   stochD1 = stochDValues[2];
+   emaFast0 = emaFastValues[1];
+   emaFast1 = emaFastValues[2];
+   emaSlow0 = emaSlowValues[1];
+   emaSlow1 = emaSlowValues[2];
+   atr = atrValues[1];
+   bandUpper = bandUpperValues[1];
+   bandLower = bandLowerValues[1];
    return true;
 }
 
-double CalcLots(double slPts){ if(slPts<=0) return 0; double bal=AccountInfoDouble(ACCOUNT_BALANCE), risk=bal*(InpRiskPercent/100.0), tv=SymbolInfoDouble(InpSymbol,SYMBOL_TRADE_TICK_VALUE), ts=SymbolInfoDouble(InpSymbol,SYMBOL_TRADE_TICK_SIZE), pt=SymbolInfoDouble(InpSymbol,SYMBOL_POINT); if(tv<=0||ts<=0||pt<=0) return 0; double vpp=tv*(pt/ts); double lots=risk/(slPts*vpp); double minLot=SymbolInfoDouble(InpSymbol,SYMBOL_VOLUME_MIN), maxLot=SymbolInfoDouble(InpSymbol,SYMBOL_VOLUME_MAX), step=SymbolInfoDouble(InpSymbol,SYMBOL_VOLUME_STEP); lots=MathMax(minLot,MathMin(MathMin(maxLot,InpMaxLot),lots)); lots=MathFloor(lots/step)*step; return NormalizeDouble(lots,2); }
+bool IsSwingHigh(const MqlRates &rates[], const int index, const int window)
+{
+   for(int shift = 1; shift <= window; shift++)
+   {
+      if(rates[index].high <= rates[index - shift].high || rates[index].high <= rates[index + shift].high)
+         return false;
+   }
+   return true;
+}
 
-void ManageTrailing(){ if(!InpUseTrailingStop) return; double atr=GetATR(); if(atr<=0) return; double pt=SymbolInfoDouble(InpSymbol,SYMBOL_POINT); int d=(int)SymbolInfoInteger(InpSymbol,SYMBOL_DIGITS); double trail=atr*InpTrailATRMultiplier; for(int i=PositionsTotal()-1;i>=0;i--){ ulong t=PositionGetTicket(i); if(t==0||!PositionSelectByTicket(t)) continue; if(PositionGetString(POSITION_SYMBOL)!=InpSymbol||PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue; long type=PositionGetInteger(POSITION_TYPE); double sl=PositionGetDouble(POSITION_SL), tp=PositionGetDouble(POSITION_TP), open=PositionGetDouble(POSITION_PRICE_OPEN); if(type==POSITION_TYPE_BUY){ double bid=SymbolInfoDouble(InpSymbol,SYMBOL_BID); if(InpUseBreakEven && bid-open>=atr*InpBreakEvenATRMultiplier && (sl<open||sl==0)) trade.PositionModify(InpSymbol,NormalizeDouble(open,d),tp); double nsl=NormalizeDouble(bid-trail,d); if(nsl>sl) trade.PositionModify(InpSymbol,nsl,tp);} else { double ask=SymbolInfoDouble(InpSymbol,SYMBOL_ASK); if(InpUseBreakEven && open-ask>=atr*InpBreakEvenATRMultiplier && (sl>open||sl==0)) trade.PositionModify(InpSymbol,NormalizeDouble(open,d),tp); double nsl=NormalizeDouble(ask+trail,d); if(sl==0||nsl<sl) trade.PositionModify(InpSymbol,nsl,tp);} }}
+bool IsSwingLow(const MqlRates &rates[], const int index, const int window)
+{
+   for(int shift = 1; shift <= window; shift++)
+   {
+      if(rates[index].low >= rates[index - shift].low || rates[index].low >= rates[index + shift].low)
+         return false;
+   }
+   return true;
+}
 
-void OnTick(){
-   if(_Symbol!=InpSymbol) return;
-   ManageTrailing();
-   datetime bar=iTime(InpSymbol,InpTimeframe,0); if(bar==0||bar==lastBarTime) return; lastBarTime=bar; lastTradeBarShift++;
-   CleanupTradeTimes();
+bool RecalculateM15Swings(const bool force)
+{
+   datetime m15Bar = iTime(InpSymbol, PERIOD_M15, 0);
+   if(m15Bar == 0)
+      return false;
+   if(!force && m15Bar == lastM15BarTime)
+      return true;
 
-   if(!CanOpenTrade()) return;
-   int openPos=CountOpenPositions();
+   lastM15BarTime = m15Bar;
 
-   double support,resistance,zone; int supSt,resSt; if(!BuildSR(support,resistance,supSt,resSt,zone)){ LogOncePerDecision("No trade: SR not ready"); return; }
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int barsNeeded = MathMax(InpSwingLookbackBars, InpSwingWindow * 2 + 20);
+   int copied = CopyRates(InpSymbol, PERIOD_M15, 0, barsNeeded, rates);
+   if(copied < InpSwingWindow * 2 + 10)
+      return false;
 
-   TrendDirection dir; MarketRegime regime; string reason=""; int ai=ComputeAIConfidence(dir,regime,reason,support,resistance,zone);
-   LogOncePerDecision("Regime="+IntegerToString((int)regime)+" "+reason+" SR sup="+DoubleToString(support,_Digits)+" res="+DoubleToString(resistance,_Digits));
-   if(InpUseAIConfirmation && ai<InpMinAIConfidenceToTrade){ LogOncePerDecision("No trade: AI confidence too low"); return; }
+   bool foundLow = false;
+   bool foundHigh = false;
+   for(int i = InpSwingWindow + 1; i < copied - InpSwingWindow; i++)
+   {
+      if(!foundLow && IsSwingLow(rates, i, InpSwingWindow))
+      {
+         lastSwingLow = rates[i].low;
+         lastSwingLowTime = rates[i].time;
+         foundLow = true;
+      }
 
-   double mid=(SymbolInfoDouble(InpSymbol,SYMBOL_BID)+SymbolInfoDouble(InpSymbol,SYMBOL_ASK))*0.5;
-   bool nearSup=(support>0&&MathAbs(mid-support)<=zone), nearRes=(resistance>0&&MathAbs(mid-resistance)<=zone);
-   bool bullRej=iClose(InpSymbol,InpTimeframe,1)>iOpen(InpSymbol,InpTimeframe,1) && (MathMin(iOpen(InpSymbol,InpTimeframe,1),iClose(InpSymbol,InpTimeframe,1))-iLow(InpSymbol,InpTimeframe,1))>MathAbs(iClose(InpSymbol,InpTimeframe,1)-iOpen(InpSymbol,InpTimeframe,1))*1.2;
-   bool bearRej=iClose(InpSymbol,InpTimeframe,1)<iOpen(InpSymbol,InpTimeframe,1) && (iHigh(InpSymbol,InpTimeframe,1)-MathMax(iOpen(InpSymbol,InpTimeframe,1),iClose(InpSymbol,InpTimeframe,1)))>MathAbs(iClose(InpSymbol,InpTimeframe,1)-iOpen(InpSymbol,InpTimeframe,1))*1.2;
+      if(!foundHigh && IsSwingHigh(rates, i, InpSwingWindow))
+      {
+         lastSwingHigh = rates[i].high;
+         lastSwingHighTime = rates[i].time;
+         foundHigh = true;
+      }
 
-   bool buy=false,sell=false;
-   if(regime==REGIME_CHOPPY){
-      if(InpConsolidationSROnly){ buy=nearSup&&bullRej&&!nearRes; sell=nearRes&&bearRej&&!nearSup; }
-   } else if(regime==REGIME_MODERATE){
-      buy=(nearSup&&bullRej&&!nearRes&&dir==TREND_BUY); sell=(nearRes&&bearRej&&!nearSup&&dir==TREND_SELL);
-   } else if(regime==REGIME_STRONG){
-      if(InpStrongTrendIgnoresSR && ai>=InpMinAIConfidenceIgnoreSR){ buy=(dir==TREND_BUY); sell=(dir==TREND_SELL); }
-      else { buy=nearSup&&bullRej&&!nearRes; sell=nearRes&&bearRej&&!nearSup; }
+      if(foundLow && foundHigh)
+         break;
    }
 
-   if(buy&&nearRes) buy=false; if(sell&&nearSup) sell=false;
-   if(!buy&&!sell){ LogOncePerDecision("No trade: setup filters not met"); return; }
+   if(foundLow || foundHigh)
+      LogDecision(StringFormat("M15 swings recalculated: low=%.5f high=%.5f", lastSwingLow, lastSwingHigh));
 
-   int allowed=InpMaxOpenPositions;
-   if(InpEnableHighConfidenceScaleIn && regime==REGIME_STRONG && ai>=InpScaleInMinConfidence) allowed=MathMax(InpMaxOpenPositions,InpScaleInMaxPositions);
-   if(openPos>=allowed){ LogOncePerDecision("No trade: max open positions reached"); return; }
+   return foundLow && foundHigh;
+}
 
-   double atr=GetATR(); double pt=SymbolInfoDouble(InpSymbol,SYMBOL_POINT); int digits=(int)SymbolInfoInteger(InpSymbol,SYMBOL_DIGITS);
-   double slPts=(atr*InpATRSLMultiplier)/pt, tpPts=(atr*InpATRTPMultiplier)/pt; if(slPts<=0||tpPts<=0){ LogOncePerDecision("No trade: invalid ATR stops"); return; }
-   double lot=CalcLots(slPts); if(lot<=0){ LogOncePerDecision("No trade: lot calc failed"); return; }
+int CountBotPositions(const long positionType = -1)
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+      if(positionType >= 0 && PositionGetInteger(POSITION_TYPE) != positionType)
+         continue;
+      count++;
+   }
+   return count;
+}
 
-   bool sent=false; double ask=SymbolInfoDouble(InpSymbol,SYMBOL_ASK), bid=SymbolInfoDouble(InpSymbol,SYMBOL_BID);
-   if(buy){ double sl=NormalizeDouble(ask-slPts*pt,digits), tp=NormalizeDouble(ask+tpPts*pt,digits); sent=trade.Buy(lot,InpSymbol,ask,sl,tp,"GTB v2.30 BUY"); }
-   if(sell){ double sl=NormalizeDouble(bid+slPts*pt,digits), tp=NormalizeDouble(bid-tpPts*pt,digits); sent=trade.Sell(lot,InpSymbol,bid,sl,tp,"GTB v2.30 SELL"); }
+double BotPositionProfit(const long positionType = -1)
+{
+   double profit = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+      if(positionType >= 0 && PositionGetInteger(POSITION_TYPE) != positionType)
+         continue;
+      profit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   }
+   return profit;
+}
 
-   if(sent){ lastTradeTime=TimeCurrent(); lastTradeBarShift=0; int n=ArraySize(tradeTimes); ArrayResize(tradeTimes,n+1); tradeTimes[n]=lastTradeTime; LogOncePerDecision("Trade opened lot="+DoubleToString(lot,2)+" AI="+IntegerToString(ai)); }
-   else{ Print("Trade failed. Retcode=",trade.ResultRetcode()," Desc=",trade.ResultRetcodeDescription()," LastError=",GetLastError()); }
+bool ClosePositionByTicket(const ulong ticket, const string reason)
+{
+   if(!PositionSelectByTicket(ticket))
+      return false;
+
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   double price = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? SymbolInfoDouble(InpSymbol, SYMBOL_BID) : SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+   bool ok = trade.PositionClose(ticket);
+   if(ok)
+      TradeLog("CLOSE", reason, price, volume, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+   else
+      Print("Position close failed. ticket=", ticket, " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+   return ok;
+}
+
+void CloseProfitableLongs()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+      if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY)
+         continue;
+
+      double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      if(profit >= InpLongQuickProfitMoney)
+         ClosePositionByTicket(ticket, "long reached quick profit target");
+   }
+}
+
+void CloseAllBotPositions(const string reason)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+      ClosePositionByTicket(ticket, reason);
+   }
+}
+
+void ManageNetExit()
+{
+   int shorts = CountBotPositions(POSITION_TYPE_SELL);
+   if(shorts <= 0)
+      return;
+
+   double netProfit = BotPositionProfit(-1);
+   if(netProfit >= InpNetCloseProfitMoney)
+   {
+      CloseAllBotPositions("net basket breakeven/profit reached");
+      cycleActive = false;
+      shortAddsThisCycle = 0;
+   }
+}
+
+bool IsSpreadOk()
+{
+   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      return false;
+
+   double spreadPoints = (ask - bid) / point;
+   if(spreadPoints > InpMaxSpreadPoints)
+   {
+      LogDecision(StringFormat("No trade: spread %.1f points exceeds max %.1f", spreadPoints, InpMaxSpreadPoints));
+      return false;
+   }
+   return true;
+}
+
+double NormalizeVolume(const double volume)
+{
+   double minLot = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0)
+      step = 0.01;
+
+   double clipped = MathMax(minLot, MathMin(MathMin(maxLot, InpMaxLot), volume));
+   double normalized = MathFloor(clipped / step) * step;
+   if(normalized < minLot)
+      normalized = minLot;
+   return NormalizeDouble(normalized, 2);
+}
+
+double CalculateLot(const double atr)
+{
+   if(InpLotSizingMode == LOT_FIXED)
+      return NormalizeVolume(InpFixedLot);
+
+   double stopDistance = atr * InpEmergencyStopATR;
+   double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
+   if(stopDistance <= 0.0 || tickValue <= 0.0 || tickSize <= 0.0)
+      return 0.0;
+
+   double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * (InpRiskPercent / 100.0);
+   double lossPerLot = (stopDistance / tickSize) * tickValue;
+   if(lossPerLot <= 0.0)
+      return 0.0;
+
+   return NormalizeVolume(riskMoney / lossPerLot);
+}
+
+double DailyVWAP()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   datetime dayStart = iTime(InpSymbol, PERIOD_D1, 0);
+   if(dayStart == 0)
+      return 0.0;
+
+   int copied = CopyRates(InpSymbol, PERIOD_M5, dayStart, TimeCurrent(), rates);
+   if(copied <= 0)
+      return 0.0;
+
+   double pv = 0.0;
+   double volume = 0.0;
+   for(int i = 0; i < copied; i++)
+   {
+      double typical = (rates[i].high + rates[i].low + rates[i].close) / 3.0;
+      double vol = (double)rates[i].tick_volume;
+      pv += typical * vol;
+      volume += vol;
+   }
+
+   if(volume <= 0.0)
+      return 0.0;
+   return pv / volume;
+}
+
+bool M1BullishTrigger()
+{
+   double open = iOpen(InpSymbol, PERIOD_M1, 1);
+   double close = iClose(InpSymbol, PERIOD_M1, 1);
+   double low = iLow(InpSymbol, PERIOD_M1, 1);
+   if(open == 0.0 || close == 0.0 || low == 0.0)
+      return false;
+
+   double body = MathAbs(close - open);
+   double lowerWick = MathMin(open, close) - low;
+   return close > open && lowerWick >= body * 0.50;
+}
+
+bool OpenMarketPair(const double lot,
+                    const double atr,
+                    const double rsi,
+                    const double stochK,
+                    const double stochD,
+                    const double emaFast,
+                    const double emaSlow,
+                    const double vwap,
+                    const double bandLower,
+                    const double bandUpper)
+{
+   int digits = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
+   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+   double buyStop = NormalizeDouble(ask - atr * InpEmergencyStopATR, digits);
+   double sellStop = NormalizeDouble(bid + atr * InpEmergencyStopATR, digits);
+
+   bool buyOk = trade.Buy(lot, InpSymbol, 0.0, buyStop, 0.0, "HedgedRange long leg");
+   if(!buyOk)
+   {
+      Print("Buy leg failed. retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+      return false;
+   }
+   TradeLog("OPEN_BUY", "confirmed M15 low + M5 indicators + M1 bullish trigger", ask, lot, rsi, stochK, stochD, emaFast, emaSlow, atr, vwap, bandLower, bandUpper);
+
+   bool sellOk = trade.Sell(lot, InpSymbol, 0.0, sellStop, 0.0, "HedgedRange short hedge");
+   if(!sellOk)
+   {
+      Print("Sell hedge failed; closing buy leg. retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+      CloseAllBotPositions("hedge leg failed");
+      return false;
+   }
+   TradeLog("OPEN_SELL", "simultaneous hedge at range low", bid, lot, rsi, stochK, stochD, emaFast, emaSlow, atr, vwap, bandLower, bandUpper);
+
+   lastEntryTime = TimeCurrent();
+   cycleActive = true;
+   shortAddsThisCycle = 0;
+   return true;
+}
+
+bool OpenSwingHighShort(const double lot,
+                        const double atr,
+                        const double rsi,
+                        const double stochK,
+                        const double stochD,
+                        const double emaFast,
+                        const double emaSlow,
+                        const double vwap,
+                        const double bandLower,
+                        const double bandUpper,
+                        const string reason)
+{
+   int digits = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
+   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+   double stop = NormalizeDouble(bid + atr * InpEmergencyStopATR, digits);
+
+   bool ok = false;
+   if(InpUseSellLimitAtSwingHigh && lastSwingHigh > bid)
+   {
+      datetime expiry = TimeCurrent() + InpPendingExpiryMinutes * 60;
+      ok = trade.SellLimit(lot, NormalizeDouble(lastSwingHigh, digits), InpSymbol, stop, 0.0, ORDER_TIME_SPECIFIED, expiry, "HedgedRange swing-high limit short");
+   }
+   else
+   {
+      ok = trade.Sell(lot, InpSymbol, 0.0, stop, 0.0, "HedgedRange swing-high short");
+   }
+
+   if(ok)
+   {
+      TradeLog("ADD_SELL", reason, bid, lot, rsi, stochK, stochD, emaFast, emaSlow, atr, vwap, bandLower, bandUpper);
+      shortAddsThisCycle++;
+      lastSwingHighAddBar = iTime(InpSymbol, PERIOD_M15, 0);
+   }
+   else
+   {
+      Print("Swing-high short failed. retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+   }
+   return ok;
+}
+
+void EvaluateRangeLowEntry()
+{
+   if(!IsSpreadOk())
+      return;
+   if((TimeCurrent() - lastEntryTime) < InpMinSecondsBetweenEntries)
+      return;
+   if(CountBotPositions(-1) > 0)
+      return;
+   if(CountBotPositions(-1) + 2 > InpMaxSimultaneousPositions)
+      return;
+   if(lastSwingLow <= 0.0)
+      return;
+
+   double rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower;
+   if(!GetIndicatorSnapshot(rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower))
+   {
+      LogDecision("No trade: indicator data not ready");
+      return;
+   }
+
+   if(atr < InpMinATR)
+   {
+      LogDecision(StringFormat("No trade: M15 ATR %.5f below minimum %.5f", atr, InpMinATR));
+      return;
+   }
+
+   double vwap = DailyVWAP();
+   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+   double mid = (bid + ask) * 0.5;
+   double swingLowBuffer = atr * InpSwingLowBufferATR;
+   bool nearSwingLow = MathAbs(mid - lastSwingLow) <= swingLowBuffer;
+   bool rsiOk = rsi <= InpRSIOversold;
+   bool stochCrossUp = stochK1 <= stochD1 && stochK0 > stochD0;
+   bool emaTurningUp = emaFast0 > emaFast1 && emaFast0 >= emaSlow0;
+   bool bullishM1 = M1BullishTrigger();
+   bool lowerBandTouch = !InpRequireLowerBandTouch || iLow(InpSymbol, PERIOD_M5, 1) <= bandLower + atr * InpBandTouchBufferATR;
+   bool vwapOk = !InpRequireVwapConfluence || (vwap > 0.0 && mid < vwap);
+
+   if(!(nearSwingLow && rsiOk && stochCrossUp && emaTurningUp && bullishM1 && lowerBandTouch && vwapOk))
+   {
+      LogDecision(StringFormat("No trade: low setup not met nearLow=%s RSI=%.2f stochCross=%s emaUp=%s M1Bull=%s lowerBB=%s vwap=%s",
+                               nearSwingLow ? "Y" : "N", rsi, stochCrossUp ? "Y" : "N", emaTurningUp ? "Y" : "N",
+                               bullishM1 ? "Y" : "N", lowerBandTouch ? "Y" : "N", vwapOk ? "Y" : "N"));
+      return;
+   }
+
+   double lot = CalculateLot(atr);
+   if(lot <= 0.0)
+   {
+      LogDecision("No trade: lot calculation failed");
+      return;
+   }
+
+   OpenMarketPair(lot, atr, rsi, stochK0, stochD0, emaFast0, emaSlow0, vwap, bandLower, bandUpper);
+}
+
+void EvaluateSwingHighAdd()
+{
+   if(!cycleActive)
+      return;
+   if(!IsSpreadOk())
+      return;
+   if(shortAddsThisCycle >= InpMaxShortAddsPerCycle)
+      return;
+   if(CountBotPositions(-1) >= InpMaxSimultaneousPositions)
+      return;
+   if(lastSwingHigh <= 0.0)
+      return;
+
+   double rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower;
+   if(!GetIndicatorSnapshot(rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower))
+      return;
+
+   if(atr < InpMinATR)
+      return;
+
+   double vwap = DailyVWAP();
+   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+   double mid = (bid + ask) * 0.5;
+   bool nearSwingHigh = MathAbs(mid - lastSwingHigh) <= atr * InpSwingHighBufferATR;
+   bool rsiApproach = rsi >= InpRSISwingHigh;
+   bool vwapConfluence = vwap > 0.0 && mid >= vwap;
+   bool upperBandConfluence = iHigh(InpSymbol, PERIOD_M5, 1) >= bandUpper - atr * InpBandTouchBufferATR;
+   bool confluenceOk = !InpRequireUpperBandAdd || (vwapConfluence && upperBandConfluence);
+   datetime currentM15 = iTime(InpSymbol, PERIOD_M15, 0);
+
+   if(!(nearSwingHigh && rsiApproach && confluenceOk) || currentM15 == lastSwingHighAddBar)
+      return;
+
+   CloseProfitableLongs();
+   double lot = CalculateLot(atr);
+   if(lot <= 0.0)
+      return;
+
+   string reason = StringFormat("M15 swing high add; RSI %.2f; VWAP=%s upperBB=%s", rsi, vwapConfluence ? "Y" : "N", upperBandConfluence ? "Y" : "N");
+   OpenSwingHighShort(lot, atr, rsi, stochK0, stochD0, emaFast0, emaSlow0, vwap, bandLower, bandUpper, reason);
+}
+
+void OnTick()
+{
+   if(_Symbol != InpSymbol)
+      return;
+
+   RecalculateM15Swings(false);
+   CloseProfitableLongs();
+   ManageNetExit();
+
+   datetime m1Bar = iTime(InpSymbol, PERIOD_M1, 0);
+   if(m1Bar == 0 || m1Bar == lastM1BarTime)
+      return;
+   lastM1BarTime = m1Bar;
+
+   EvaluateSwingHighAdd();
+   EvaluateRangeLowEntry();
 }
