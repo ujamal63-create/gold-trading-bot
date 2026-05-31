@@ -1,7 +1,7 @@
 #property copyright "gold-trading-bot"
-#property version   "3.00"
+#property version   "4.00"
 #property strict
-#property description "Gold Hedged Range Strategy: M15 swing levels, M5 indicator confirmation, M1 trigger execution."
+#property description "XAUUSD Williams Fractals trend-continuation scalper for M1 charts. Backtest and demo test before live use."
 
 #include <Trade/Trade.mqh>
 
@@ -10,654 +10,475 @@ CTrade trade;
 enum LotSizingMode
 {
    LOT_FIXED = 0,
-   LOT_EQUITY_RISK = 1
+   LOT_RISK_PERCENT = 1
 };
 
-input string          InpSymbol                   = "XAUUSD";
-input ulong           InpMagicNumber              = 260513;
-input bool            InpDebugMode                = true;
-input bool            InpWriteCsvLog              = true;
-input int             InpDeviationPoints          = 30;
+input string          InpSymbol                     = "XAUUSD";
+input ulong           InpMagicNumber                = 260531;
+input int             InpDeviationPoints            = 30;
+input LotSizingMode   InpLotMode                    = LOT_RISK_PERCENT;
+input double          InpFixedLot                   = 0.01;
+input double          InpRiskPercent                = 0.50;
+input double          InpMaxLot                     = 5.00;
 
-input int             InpSwingWindow              = 3;
-input int             InpSwingLookbackBars        = 220;
-input double          InpSwingLowBufferATR        = 0.35;
-input double          InpSwingHighBufferATR       = 0.50;
-input double          InpMinATR                   = 1.00;
+input int             InpM5EMA200Period             = 200;
+input int             InpM1EMA50Period              = 50;
+input int             InpRSIPeriod                  = 14;
+input double          InpRSIBuyMin                  = 45.0;
+input double          InpRSIBuyMax                  = 70.0;
+input double          InpRSISellMin                 = 30.0;
+input double          InpRSISellMax                 = 55.0;
+input int             InpADXPeriod                  = 14;
+input double          InpMinADX                     = 20.0;
+input int             InpATRPeriod                  = 14;
+input double          InpMinATR                     = 0.30;
+input double          InpATRStopBuffer              = 0.50;
+input double          InpMinSLPoints                = 100.0;
+input double          InpMaxSLPoints                = 1500.0;
+input double          InpMaxSpreadPoints            = 60.0;
+input double          InpMinEMA200DistanceATR       = 0.25;
 
-input int             InpRSIPeriod                = 14;
-input double          InpRSIOversold              = 35.0;
-input double          InpRSISwingHigh             = 60.0;
-input int             InpStochKPeriod             = 5;
-input int             InpStochDPeriod             = 3;
-input int             InpStochSlowing             = 3;
-input int             InpFastEMA                  = 8;
-input int             InpSlowEMA                  = 21;
-input int             InpATRPeriod                = 14;
-input int             InpBandsPeriod              = 20;
-input double          InpBandsDeviation           = 2.0;
-input double          InpBandTouchBufferATR       = 0.10;
-input bool            InpRequireVwapConfluence    = false;
-input bool            InpRequireLowerBandTouch    = true;
-input bool            InpRequireUpperBandAdd      = false;
+input int             InpMaxTradesPerDay            = 20;
+input int             InpMinMinutesBetweenTrades    = 3;
+input bool            InpEnablePyramiding           = false;
+input double          InpDailyLossLimitPercent      = 3.0;
+input double          InpDailyProfitTargetPercent   = 5.0;
+input int             InpLondonStartHHMM            = 700;
+input int             InpLondonEndHHMM              = 1200;
+input int             InpNewYorkStartHHMM           = 1230;
+input int             InpNewYorkEndHHMM             = 1700;
+input bool            InpAllowAsianHighVolatility   = false;
+input int             InpAsianStartHHMM             = 0;
+input int             InpAsianEndHHMM               = 600;
+input double          InpAsianMinATRMultiplier      = 1.75;
 
-input LotSizingMode   InpLotSizingMode            = LOT_FIXED;
-input double          InpFixedLot                 = 0.01;
-input double          InpRiskPercent              = 0.30;
-input double          InpEmergencyStopATR         = 2.0;
-input double          InpMaxLot                   = 0.10;
-input int             InpMaxSimultaneousPositions = 6;
-input int             InpMaxShortAddsPerCycle     = 2;
-input int             InpMinSecondsBetweenEntries = 60;
-input double          InpMaxSpreadPoints          = 80;
-input double          InpNetCloseProfitMoney      = 0.00;
-input double          InpLongQuickProfitMoney     = 0.01;
-input bool            InpUseSellLimitAtSwingHigh  = false;
-input int             InpPendingExpiryMinutes     = 180;
+input bool            InpEnableM15StructureFilter   = true;
+input int             InpM15StructureLookback       = 48;
+input double          InpM15StructureBufferATR      = 0.75;
+input bool            InpEnableNewsFilter           = false;
+input string          InpNewsCurrency               = "USD";
+input int             InpNewsBlockMinutes           = 5;
 
-int rsiM5Handle = INVALID_HANDLE;
-int stochM5Handle = INVALID_HANDLE;
-int fastEmaM5Handle = INVALID_HANDLE;
-int slowEmaM5Handle = INVALID_HANDLE;
-int atrM15Handle = INVALID_HANDLE;
-int bandsM5Handle = INVALID_HANDLE;
+input double          InpFinalTakeProfitRR          = 1.50;
+input bool            InpEnableTP1PartialClose      = true;
+input double          InpTP1ClosePercent            = 50.0;
+input bool            InpEnableBreakeven            = true;
+input bool            InpEnableTrailingStop         = true;
+input double          InpTrailingATRMultiplier      = 0.75;
+input bool            InpCloseOnOppositeFractal     = false;
 
-datetime lastM1BarTime = 0;
-datetime lastM15BarTime = 0;
-datetime lastEntryTime = 0;
-datetime lastSwingHighAddBar = 0;
-datetime lastDecisionLogBar = 0;
-string lastDecisionMessage = "";
+int fractalsM1Handle = INVALID_HANDLE;
+int emaM5Handle      = INVALID_HANDLE;
+int emaM1Handle      = INVALID_HANDLE;
+int rsiM1Handle      = INVALID_HANDLE;
+int atrM1Handle      = INVALID_HANDLE;
+int adxM5Handle      = INVALID_HANDLE;
 
-double lastSwingLow = 0.0;
-double lastSwingHigh = 0.0;
-datetime lastSwingLowTime = 0;
-datetime lastSwingHighTime = 0;
-int shortAddsThisCycle = 0;
-bool cycleActive = false;
+datetime lastBullishFractalTime = 0;
+datetime lastBearishFractalTime = 0;
+datetime consumedBuySignalTime  = 0;
+datetime consumedSellSignalTime = 0;
+datetime lastEntryTime          = 0;
+datetime currentDayStart        = 0;
+double   dayStartBalance        = 0.0;
+double   latestBullishLow       = 0.0;
+double   latestBearishHigh      = 0.0;
 
-void LogDecision(const string message)
+bool ReadBufferValue(const int handle, const int buffer, const int shift, double &value)
 {
-   if(!InpDebugMode)
-      return;
+   double values[1];
+   if(CopyBuffer(handle, buffer, shift, 1, values) != 1)
+      return false;
+   value = values[0];
+   return (value != EMPTY_VALUE);
+}
 
-   datetime bar = iTime(InpSymbol, PERIOD_M1, 0);
-   if(message != lastDecisionMessage || bar != lastDecisionLogBar)
+datetime DayStart(const datetime when)
+{
+   MqlDateTime parts;
+   TimeToStruct(when, parts);
+   parts.hour = 0;
+   parts.min = 0;
+   parts.sec = 0;
+   return StructToTime(parts);
+}
+
+void RefreshDayState()
+{
+   datetime start = DayStart(TimeCurrent());
+   if(start != currentDayStart)
    {
-      Print(message);
-      lastDecisionMessage = message;
-      lastDecisionLogBar = bar;
+      currentDayStart = start;
+      dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    }
 }
 
-void TradeLog(const string eventName,
-              const string reason,
-              const double price,
-              const double volume,
-              const double rsi,
-              const double stochK,
-              const double stochD,
-              const double emaFast,
-              const double emaSlow,
-              const double atr,
-              const double vwap,
-              const double bandLower,
-              const double bandUpper)
+bool IsOurPosition(const ulong ticket)
 {
-   string line = StringFormat("%s | %s | %s | price=%.5f lot=%.2f RSI=%.2f StochK=%.2f StochD=%.2f EMA%d=%.5f EMA%d=%.5f ATR=%.5f VWAP=%.5f BB_L=%.5f BB_U=%.5f swingLow=%.5f swingHigh=%.5f",
-                              TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), eventName, reason, price, volume,
-                              rsi, stochK, stochD, InpFastEMA, emaFast, InpSlowEMA, emaSlow, atr, vwap, bandLower, bandUpper,
-                              lastSwingLow, lastSwingHigh);
-   Print(line);
+   return PositionSelectByTicket(ticket)
+          && PositionGetString(POSITION_SYMBOL) == InpSymbol
+          && (ulong)PositionGetInteger(POSITION_MAGIC) == InpMagicNumber;
+}
 
-   if(!InpWriteCsvLog)
+int CountOurPositions(const ENUM_POSITION_TYPE type)
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(IsOurPosition(ticket) && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == type)
+         ++count;
+   }
+   return count;
+}
+
+double FloatingProfit()
+{
+   double result = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(IsOurPosition(ticket))
+         result += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   }
+   return result;
+}
+
+int TradesToday()
+{
+   if(!HistorySelect(currentDayStart, TimeCurrent()))
+      return 0;
+   int count = 0;
+   for(int i = HistoryDealsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) == InpSymbol
+         && (ulong)HistoryDealGetInteger(ticket, DEAL_MAGIC) == InpMagicNumber
+         && (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
+         ++count;
+   }
+   return count;
+}
+
+double RealizedProfitToday()
+{
+   if(!HistorySelect(currentDayStart, TimeCurrent()))
+      return 0.0;
+   double result = 0.0;
+   for(int i = HistoryDealsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) == InpSymbol
+         && (ulong)HistoryDealGetInteger(ticket, DEAL_MAGIC) == InpMagicNumber)
+         result += HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_SWAP) + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+   }
+   return result;
+}
+
+bool IsTimeInside(const int hhmm, const int startHHMM, const int endHHMM)
+{
+   if(startHHMM <= endHHMM)
+      return hhmm >= startHHMM && hhmm <= endHHMM;
+   return hhmm >= startHHMM || hhmm <= endHHMM;
+}
+
+bool IsTradingSession(const double atr)
+{
+   MqlDateTime parts;
+   TimeToStruct(TimeCurrent(), parts);
+   int hhmm = parts.hour * 100 + parts.min;
+   if(IsTimeInside(hhmm, InpLondonStartHHMM, InpLondonEndHHMM) || IsTimeInside(hhmm, InpNewYorkStartHHMM, InpNewYorkEndHHMM))
+      return true;
+   return InpAllowAsianHighVolatility
+          && IsTimeInside(hhmm, InpAsianStartHHMM, InpAsianEndHHMM)
+          && atr >= InpMinATR * InpAsianMinATRMultiplier;
+}
+
+bool IsNearHighImpactNews()
+{
+   if(!InpEnableNewsFilter)
+      return false;
+   datetime now = TimeTradeServer();
+   MqlCalendarValue values[];
+   int found = CalendarValueHistory(values, now - InpNewsBlockMinutes * 60, now + InpNewsBlockMinutes * 60, NULL, InpNewsCurrency);
+   if(found < 0)
+   {
+      Print("CalendarValueHistory failed. Error=", GetLastError(), ". News filter blocks trading for safety.");
+      return true;
+   }
+   for(int i = 0; i < found; ++i)
+   {
+      MqlCalendarEvent event;
+      if(CalendarEventById(values[i].event_id, event) && event.importance == CALENDAR_IMPORTANCE_HIGH)
+         return true;
+   }
+   return false;
+}
+
+void RefreshConfirmedFractals()
+{
+   // Williams Fractals require two bars to the right. Scanning starts at shift 2, so only confirmed values are used.
+   for(int shift = 2; shift <= 100; ++shift)
+   {
+      double value = 0.0;
+      if(ReadBufferValue(fractalsM1Handle, 1, shift, value) && value > 0.0)
+      {
+         datetime time = iTime(InpSymbol, PERIOD_M1, shift);
+         if(time > lastBullishFractalTime)
+         {
+            lastBullishFractalTime = time;
+            latestBullishLow = value;
+         }
+         break;
+      }
+   }
+   for(int shift = 2; shift <= 100; ++shift)
+   {
+      double value = 0.0;
+      if(ReadBufferValue(fractalsM1Handle, 0, shift, value) && value > 0.0)
+      {
+         datetime time = iTime(InpSymbol, PERIOD_M1, shift);
+         if(time > lastBearishFractalTime)
+         {
+            lastBearishFractalTime = time;
+            latestBearishHigh = value;
+         }
+         break;
+      }
+   }
+}
+
+bool PassesM15StructureFilter(const bool isBuy, const double price, const double atr)
+{
+   if(!InpEnableM15StructureFilter)
+      return true;
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(InpSymbol, PERIOD_M15, 1, InpM15StructureLookback, rates);
+   if(copied < 5)
+      return false;
+   double support = rates[0].low;
+   double resistance = rates[0].high;
+   for(int i = 1; i < copied; ++i)
+   {
+      support = MathMin(support, rates[i].low);
+      resistance = MathMax(resistance, rates[i].high);
+   }
+   double buffer = atr * InpM15StructureBufferATR;
+   return isBuy ? (resistance - price > buffer) : (price - support > buffer);
+}
+
+double NormalizeVolume(double volume)
+{
+   double minimum = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
+   double maximum = MathMin(SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX), InpMaxLot);
+   double step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0)
+      return 0.0;
+   volume = MathFloor(volume / step) * step;
+   volume = MathMax(minimum, MathMin(maximum, volume));
+   return NormalizeDouble(volume, 2);
+}
+
+double CalculateVolume(const double entry, const double stop)
+{
+   if(InpLotMode == LOT_FIXED)
+      return NormalizeVolume(InpFixedLot);
+   double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPercent / 100.0;
+   double tickSize = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(tickValue <= 0.0)
+      tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0.0 || tickValue <= 0.0 || MathAbs(entry - stop) <= 0.0)
+      return 0.0;
+   return NormalizeVolume(riskMoney / (MathAbs(entry - stop) / tickSize * tickValue));
+}
+
+bool DailyLimitsAllowTrading()
+{
+   double profit = RealizedProfitToday() + FloatingProfit();
+   if(dayStartBalance <= 0.0)
+      return false;
+   return profit > -dayStartBalance * InpDailyLossLimitPercent / 100.0
+          && profit < dayStartBalance * InpDailyProfitTargetPercent / 100.0;
+}
+
+bool ModifyPosition(const ulong ticket, const double sl, const double tp)
+{
+   if(trade.PositionModify(ticket, sl, tp))
+      return true;
+   Print("PositionModify failed ticket=", ticket, " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+   return false;
+}
+
+void ManageOpenPositions(const double atr)
+{
+   RefreshConfirmedFractals();
+   MqlTick tick;
+   if(!SymbolInfoTick(InpSymbol, tick))
       return;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double price = type == POSITION_TYPE_BUY ? tick.bid : tick.ask;
+      double initialRisk = InpFinalTakeProfitRR > 0.0 ? MathAbs(tp - open) / InpFinalTakeProfitRR : MathAbs(open - sl);
+      if(initialRisk <= 0.0)
+         continue;
+      double move = type == POSITION_TYPE_BUY ? price - open : open - price;
+      string tp1Key = "GFS_TP1_" + IntegerToString((long)ticket);
+      if(InpEnableTP1PartialClose && move >= initialRisk && !GlobalVariableCheck(tp1Key))
+      {
+         double closeVolume = NormalizeVolume(PositionGetDouble(POSITION_VOLUME) * InpTP1ClosePercent / 100.0);
+         double minVolume = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
+         if(closeVolume >= minVolume && PositionGetDouble(POSITION_VOLUME) - closeVolume >= minVolume)
+         {
+            if(!trade.PositionClosePartial(ticket, closeVolume))
+               Print("TP1 partial close failed ticket=", ticket, " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+         }
+         GlobalVariableSet(tp1Key, 1.0);
+      }
+      if(move >= initialRisk)
+      {
+         double nextSL = sl;
+         if(InpEnableBreakeven)
+            nextSL = type == POSITION_TYPE_BUY ? MathMax(nextSL, open) : (sl == 0.0 ? open : MathMin(nextSL, open));
+         if(InpEnableTrailingStop)
+         {
+            double trail = type == POSITION_TYPE_BUY ? price - atr * InpTrailingATRMultiplier : price + atr * InpTrailingATRMultiplier;
+            nextSL = type == POSITION_TYPE_BUY ? MathMax(nextSL, trail) : MathMin(nextSL, trail);
+         }
+         if(MathAbs(nextSL - sl) >= SymbolInfoDouble(InpSymbol, SYMBOL_POINT))
+            ModifyPosition(ticket, nextSL, tp);
+      }
+      bool opposite = (type == POSITION_TYPE_BUY && lastBearishFractalTime > (datetime)PositionGetInteger(POSITION_TIME))
+                      || (type == POSITION_TYPE_SELL && lastBullishFractalTime > (datetime)PositionGetInteger(POSITION_TIME));
+      if(InpCloseOnOppositeFractal && opposite && !trade.PositionClose(ticket))
+         Print("Opposite-fractal close failed ticket=", ticket, " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+   }
+}
 
-   int handle = FileOpen("GoldTradingBot_HedgedRange_Log.csv", FILE_READ|FILE_WRITE|FILE_CSV|FILE_COMMON|FILE_ANSI);
-   if(handle == INVALID_HANDLE)
-      return;
+bool OpenTrade(const bool isBuy, const double atr)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(InpSymbol, tick))
+      return false;
+   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+   double entry = isBuy ? tick.ask : tick.bid;
+   double rawSL = isBuy ? latestBullishLow - atr * InpATRStopBuffer : latestBearishHigh + atr * InpATRStopBuffer;
+   double stopPoints = MathAbs(entry - rawSL) / point;
+   if(stopPoints > InpMaxSLPoints)
+      return false;
+   stopPoints = MathMax(stopPoints, InpMinSLPoints);
+   double sl = isBuy ? entry - stopPoints * point : entry + stopPoints * point;
+   double tp = isBuy ? entry + stopPoints * point * InpFinalTakeProfitRR : entry - stopPoints * point * InpFinalTakeProfitRR;
+   double volume = CalculateVolume(entry, sl);
+   if(volume <= 0.0)
+      return false;
+   bool sent = isBuy ? trade.Buy(volume, InpSymbol, 0.0, sl, tp, "Fractal continuation buy")
+                     : trade.Sell(volume, InpSymbol, 0.0, sl, tp, "Fractal continuation sell");
+   if(!sent)
+   {
+      Print("Order failed: ", isBuy ? "BUY" : "SELL", " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription(), " error=", GetLastError());
+      return false;
+   }
+   lastEntryTime = TimeCurrent();
+   Print(isBuy ? "BUY opened" : "SELL opened", " lot=", volume, " entry=", entry, " sl=", sl, " tp=", tp);
+   return true;
+}
 
-   if(FileSize(handle) == 0)
-      FileWrite(handle, "timestamp", "event", "reason", "price", "lot", "rsi", "stoch_k", "stoch_d", "ema_fast", "ema_slow", "atr", "vwap", "bb_lower", "bb_upper", "swing_low", "swing_high");
-
-   FileSeek(handle, 0, SEEK_END);
-   FileWrite(handle,
-             TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), eventName, reason,
-             DoubleToString(price, _Digits), DoubleToString(volume, 2), DoubleToString(rsi, 2), DoubleToString(stochK, 2), DoubleToString(stochD, 2),
-             DoubleToString(emaFast, _Digits), DoubleToString(emaSlow, _Digits), DoubleToString(atr, _Digits), DoubleToString(vwap, _Digits),
-             DoubleToString(bandLower, _Digits), DoubleToString(bandUpper, _Digits), DoubleToString(lastSwingLow, _Digits), DoubleToString(lastSwingHigh, _Digits));
-   FileClose(handle);
+void UpdateChartComment(const double spread, const double adx, const double rsi, const double atr, const double m5Close, const double emaM5)
+{
+   string trend = m5Close > emaM5 ? "BULLISH" : (m5Close < emaM5 ? "BEARISH" : "NEUTRAL");
+   Comment("XAUUSD Fractal Continuation Scalper\n",
+           "Trend M5: ", trend, "\n",
+           "Last bullish fractal low: ", DoubleToString(latestBullishLow, _Digits), "\n",
+           "Last bearish fractal high: ", DoubleToString(latestBearishHigh, _Digits), "\n",
+           "Spread: ", DoubleToString(spread, 1), " points\n",
+           "ADX M5: ", DoubleToString(adx, 2), "\n",
+           "RSI M1: ", DoubleToString(rsi, 2), "\n",
+           "ATR M1: ", DoubleToString(atr, _Digits), "\n",
+           "Trades today: ", TradesToday(), "/", InpMaxTradesPerDay, "\n",
+           "Daily P/L: ", DoubleToString(RealizedProfitToday() + FloatingProfit(), 2));
 }
 
 int OnInit()
 {
    if(!SymbolSelect(InpSymbol, true))
+      return INIT_FAILED;
+   fractalsM1Handle = iFractals(InpSymbol, PERIOD_M1);
+   emaM5Handle = iMA(InpSymbol, PERIOD_M5, InpM5EMA200Period, 0, MODE_EMA, PRICE_CLOSE);
+   emaM1Handle = iMA(InpSymbol, PERIOD_M1, InpM1EMA50Period, 0, MODE_EMA, PRICE_CLOSE);
+   rsiM1Handle = iRSI(InpSymbol, PERIOD_M1, InpRSIPeriod, PRICE_CLOSE);
+   atrM1Handle = iATR(InpSymbol, PERIOD_M1, InpATRPeriod);
+   adxM5Handle = iADX(InpSymbol, PERIOD_M5, InpADXPeriod);
+   if(fractalsM1Handle == INVALID_HANDLE || emaM5Handle == INVALID_HANDLE || emaM1Handle == INVALID_HANDLE
+      || rsiM1Handle == INVALID_HANDLE || atrM1Handle == INVALID_HANDLE || adxM5Handle == INVALID_HANDLE)
    {
-      Print("Failed to select symbol ", InpSymbol);
+      Print("Indicator handle initialization failed. Error=", GetLastError());
       return INIT_FAILED;
    }
-
-   rsiM5Handle = iRSI(InpSymbol, PERIOD_M5, InpRSIPeriod, PRICE_CLOSE);
-   stochM5Handle = iStochastic(InpSymbol, PERIOD_M5, InpStochKPeriod, InpStochDPeriod, InpStochSlowing, MODE_SMA, STO_LOWHIGH);
-   fastEmaM5Handle = iMA(InpSymbol, PERIOD_M5, InpFastEMA, 0, MODE_EMA, PRICE_CLOSE);
-   slowEmaM5Handle = iMA(InpSymbol, PERIOD_M5, InpSlowEMA, 0, MODE_EMA, PRICE_CLOSE);
-   atrM15Handle = iATR(InpSymbol, PERIOD_M15, InpATRPeriod);
-   bandsM5Handle = iBands(InpSymbol, PERIOD_M5, InpBandsPeriod, 0, InpBandsDeviation, PRICE_CLOSE);
-
-   if(rsiM5Handle == INVALID_HANDLE || stochM5Handle == INVALID_HANDLE || fastEmaM5Handle == INVALID_HANDLE ||
-      slowEmaM5Handle == INVALID_HANDLE || atrM15Handle == INVALID_HANDLE || bandsM5Handle == INVALID_HANDLE)
-   {
-      Print("Failed to create one or more indicator handles. LastError=", GetLastError());
-      return INIT_FAILED;
-   }
-
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
-   RecalculateM15Swings(true);
-   Print("GoldTradingBot v3.00 Hedged Range Strategy started for ", InpSymbol, ". Demo/backtest first; no profit guarantee.");
+   trade.SetTypeFillingBySymbol(InpSymbol);
+   RefreshDayState();
+   RefreshConfirmedFractals();
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
-   if(rsiM5Handle != INVALID_HANDLE) IndicatorRelease(rsiM5Handle);
-   if(stochM5Handle != INVALID_HANDLE) IndicatorRelease(stochM5Handle);
-   if(fastEmaM5Handle != INVALID_HANDLE) IndicatorRelease(fastEmaM5Handle);
-   if(slowEmaM5Handle != INVALID_HANDLE) IndicatorRelease(slowEmaM5Handle);
-   if(atrM15Handle != INVALID_HANDLE) IndicatorRelease(atrM15Handle);
-   if(bandsM5Handle != INVALID_HANDLE) IndicatorRelease(bandsM5Handle);
-}
-
-bool CopySeriesValue(const int handle, const int buffer, const int start, const int count, double &values[])
-{
-   ArraySetAsSeries(values, true);
-   return CopyBuffer(handle, buffer, start, count, values) >= count;
-}
-
-bool GetIndicatorSnapshot(double &rsi,
-                          double &stochK0,
-                          double &stochD0,
-                          double &stochK1,
-                          double &stochD1,
-                          double &emaFast0,
-                          double &emaFast1,
-                          double &emaSlow0,
-                          double &emaSlow1,
-                          double &atr,
-                          double &bandUpper,
-                          double &bandLower)
-{
-   double rsiValues[], stochKValues[], stochDValues[], emaFastValues[], emaSlowValues[], atrValues[], bandUpperValues[], bandLowerValues[];
-
-   if(!CopySeriesValue(rsiM5Handle, 0, 0, 3, rsiValues)) return false;
-   if(!CopySeriesValue(stochM5Handle, 0, 0, 3, stochKValues)) return false;
-   if(!CopySeriesValue(stochM5Handle, 1, 0, 3, stochDValues)) return false;
-   if(!CopySeriesValue(fastEmaM5Handle, 0, 0, 4, emaFastValues)) return false;
-   if(!CopySeriesValue(slowEmaM5Handle, 0, 0, 4, emaSlowValues)) return false;
-   if(!CopySeriesValue(atrM15Handle, 0, 0, 3, atrValues)) return false;
-   if(!CopySeriesValue(bandsM5Handle, 1, 0, 3, bandUpperValues)) return false;
-   if(!CopySeriesValue(bandsM5Handle, 2, 0, 3, bandLowerValues)) return false;
-
-   rsi = rsiValues[1];
-   stochK0 = stochKValues[1];
-   stochD0 = stochDValues[1];
-   stochK1 = stochKValues[2];
-   stochD1 = stochDValues[2];
-   emaFast0 = emaFastValues[1];
-   emaFast1 = emaFastValues[2];
-   emaSlow0 = emaSlowValues[1];
-   emaSlow1 = emaSlowValues[2];
-   atr = atrValues[1];
-   bandUpper = bandUpperValues[1];
-   bandLower = bandLowerValues[1];
-   return true;
-}
-
-bool IsSwingHigh(const MqlRates &rates[], const int index, const int window)
-{
-   for(int shift = 1; shift <= window; shift++)
-   {
-      if(rates[index].high <= rates[index - shift].high || rates[index].high <= rates[index + shift].high)
-         return false;
-   }
-   return true;
-}
-
-bool IsSwingLow(const MqlRates &rates[], const int index, const int window)
-{
-   for(int shift = 1; shift <= window; shift++)
-   {
-      if(rates[index].low >= rates[index - shift].low || rates[index].low >= rates[index + shift].low)
-         return false;
-   }
-   return true;
-}
-
-bool RecalculateM15Swings(const bool force)
-{
-   datetime m15Bar = iTime(InpSymbol, PERIOD_M15, 0);
-   if(m15Bar == 0)
-      return false;
-   if(!force && m15Bar == lastM15BarTime)
-      return true;
-
-   lastM15BarTime = m15Bar;
-
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int barsNeeded = MathMax(InpSwingLookbackBars, InpSwingWindow * 2 + 20);
-   int copied = CopyRates(InpSymbol, PERIOD_M15, 0, barsNeeded, rates);
-   if(copied < InpSwingWindow * 2 + 10)
-      return false;
-
-   bool foundLow = false;
-   bool foundHigh = false;
-   for(int i = InpSwingWindow + 1; i < copied - InpSwingWindow; i++)
-   {
-      if(!foundLow && IsSwingLow(rates, i, InpSwingWindow))
-      {
-         lastSwingLow = rates[i].low;
-         lastSwingLowTime = rates[i].time;
-         foundLow = true;
-      }
-
-      if(!foundHigh && IsSwingHigh(rates, i, InpSwingWindow))
-      {
-         lastSwingHigh = rates[i].high;
-         lastSwingHighTime = rates[i].time;
-         foundHigh = true;
-      }
-
-      if(foundLow && foundHigh)
-         break;
-   }
-
-   if(foundLow || foundHigh)
-      LogDecision(StringFormat("M15 swings recalculated: low=%.5f high=%.5f", lastSwingLow, lastSwingHigh));
-
-   return foundLow && foundHigh;
-}
-
-int CountBotPositions(const long positionType = -1)
-{
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
-         continue;
-      if(positionType >= 0 && PositionGetInteger(POSITION_TYPE) != positionType)
-         continue;
-      count++;
-   }
-   return count;
-}
-
-double BotPositionProfit(const long positionType = -1)
-{
-   double profit = 0.0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
-         continue;
-      if(positionType >= 0 && PositionGetInteger(POSITION_TYPE) != positionType)
-         continue;
-      profit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-   }
-   return profit;
-}
-
-bool ClosePositionByTicket(const ulong ticket, const string reason)
-{
-   if(!PositionSelectByTicket(ticket))
-      return false;
-
-   double volume = PositionGetDouble(POSITION_VOLUME);
-   double price = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? SymbolInfoDouble(InpSymbol, SYMBOL_BID) : SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-   bool ok = trade.PositionClose(ticket);
-   if(ok)
-      TradeLog("CLOSE", reason, price, volume, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-   else
-      Print("Position close failed. ticket=", ticket, " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-   return ok;
-}
-
-void CloseProfitableLongs()
-{
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
-         continue;
-      if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY)
-         continue;
-
-      double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      if(profit >= InpLongQuickProfitMoney)
-         ClosePositionByTicket(ticket, "long reached quick profit target");
-   }
-}
-
-void CloseAllBotPositions(const string reason)
-{
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != InpSymbol || (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
-         continue;
-      ClosePositionByTicket(ticket, reason);
-   }
-}
-
-void ManageNetExit()
-{
-   int shorts = CountBotPositions(POSITION_TYPE_SELL);
-   if(shorts <= 0)
-      return;
-
-   double netProfit = BotPositionProfit(-1);
-   if(netProfit >= InpNetCloseProfitMoney)
-   {
-      CloseAllBotPositions("net basket breakeven/profit reached");
-      cycleActive = false;
-      shortAddsThisCycle = 0;
-   }
-}
-
-bool IsSpreadOk()
-{
-   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
-   if(point <= 0.0)
-      return false;
-
-   double spreadPoints = (ask - bid) / point;
-   if(spreadPoints > InpMaxSpreadPoints)
-   {
-      LogDecision(StringFormat("No trade: spread %.1f points exceeds max %.1f", spreadPoints, InpMaxSpreadPoints));
-      return false;
-   }
-   return true;
-}
-
-double NormalizeVolume(const double volume)
-{
-   double minLot = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
-   if(step <= 0.0)
-      step = 0.01;
-
-   double clipped = MathMax(minLot, MathMin(MathMin(maxLot, InpMaxLot), volume));
-   double normalized = MathFloor(clipped / step) * step;
-   if(normalized < minLot)
-      normalized = minLot;
-   return NormalizeDouble(normalized, 2);
-}
-
-double CalculateLot(const double atr)
-{
-   if(InpLotSizingMode == LOT_FIXED)
-      return NormalizeVolume(InpFixedLot);
-
-   double stopDistance = atr * InpEmergencyStopATR;
-   double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
-   if(stopDistance <= 0.0 || tickValue <= 0.0 || tickSize <= 0.0)
-      return 0.0;
-
-   double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * (InpRiskPercent / 100.0);
-   double lossPerLot = (stopDistance / tickSize) * tickValue;
-   if(lossPerLot <= 0.0)
-      return 0.0;
-
-   return NormalizeVolume(riskMoney / lossPerLot);
-}
-
-double DailyVWAP()
-{
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   datetime dayStart = iTime(InpSymbol, PERIOD_D1, 0);
-   if(dayStart == 0)
-      return 0.0;
-
-   int copied = CopyRates(InpSymbol, PERIOD_M5, dayStart, TimeCurrent(), rates);
-   if(copied <= 0)
-      return 0.0;
-
-   double pv = 0.0;
-   double volume = 0.0;
-   for(int i = 0; i < copied; i++)
-   {
-      double typical = (rates[i].high + rates[i].low + rates[i].close) / 3.0;
-      double vol = (double)rates[i].tick_volume;
-      pv += typical * vol;
-      volume += vol;
-   }
-
-   if(volume <= 0.0)
-      return 0.0;
-   return pv / volume;
-}
-
-bool M1BullishTrigger()
-{
-   double open = iOpen(InpSymbol, PERIOD_M1, 1);
-   double close = iClose(InpSymbol, PERIOD_M1, 1);
-   double low = iLow(InpSymbol, PERIOD_M1, 1);
-   if(open == 0.0 || close == 0.0 || low == 0.0)
-      return false;
-
-   double body = MathAbs(close - open);
-   double lowerWick = MathMin(open, close) - low;
-   return close > open && lowerWick >= body * 0.50;
-}
-
-bool OpenMarketPair(const double lot,
-                    const double atr,
-                    const double rsi,
-                    const double stochK,
-                    const double stochD,
-                    const double emaFast,
-                    const double emaSlow,
-                    const double vwap,
-                    const double bandLower,
-                    const double bandUpper)
-{
-   int digits = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
-   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-   double buyStop = NormalizeDouble(ask - atr * InpEmergencyStopATR, digits);
-   double sellStop = NormalizeDouble(bid + atr * InpEmergencyStopATR, digits);
-
-   bool buyOk = trade.Buy(lot, InpSymbol, 0.0, buyStop, 0.0, "HedgedRange long leg");
-   if(!buyOk)
-   {
-      Print("Buy leg failed. retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-      return false;
-   }
-   TradeLog("OPEN_BUY", "confirmed M15 low + M5 indicators + M1 bullish trigger", ask, lot, rsi, stochK, stochD, emaFast, emaSlow, atr, vwap, bandLower, bandUpper);
-
-   bool sellOk = trade.Sell(lot, InpSymbol, 0.0, sellStop, 0.0, "HedgedRange short hedge");
-   if(!sellOk)
-   {
-      Print("Sell hedge failed; closing buy leg. retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-      CloseAllBotPositions("hedge leg failed");
-      return false;
-   }
-   TradeLog("OPEN_SELL", "simultaneous hedge at range low", bid, lot, rsi, stochK, stochD, emaFast, emaSlow, atr, vwap, bandLower, bandUpper);
-
-   lastEntryTime = TimeCurrent();
-   cycleActive = true;
-   shortAddsThisCycle = 0;
-   return true;
-}
-
-bool OpenSwingHighShort(const double lot,
-                        const double atr,
-                        const double rsi,
-                        const double stochK,
-                        const double stochD,
-                        const double emaFast,
-                        const double emaSlow,
-                        const double vwap,
-                        const double bandLower,
-                        const double bandUpper,
-                        const string reason)
-{
-   int digits = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
-   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-   double stop = NormalizeDouble(bid + atr * InpEmergencyStopATR, digits);
-
-   bool ok = false;
-   if(InpUseSellLimitAtSwingHigh && lastSwingHigh > bid)
-   {
-      datetime expiry = TimeCurrent() + InpPendingExpiryMinutes * 60;
-      ok = trade.SellLimit(lot, NormalizeDouble(lastSwingHigh, digits), InpSymbol, stop, 0.0, ORDER_TIME_SPECIFIED, expiry, "HedgedRange swing-high limit short");
-   }
-   else
-   {
-      ok = trade.Sell(lot, InpSymbol, 0.0, stop, 0.0, "HedgedRange swing-high short");
-   }
-
-   if(ok)
-   {
-      TradeLog("ADD_SELL", reason, bid, lot, rsi, stochK, stochD, emaFast, emaSlow, atr, vwap, bandLower, bandUpper);
-      shortAddsThisCycle++;
-      lastSwingHighAddBar = iTime(InpSymbol, PERIOD_M15, 0);
-   }
-   else
-   {
-      Print("Swing-high short failed. retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-   }
-   return ok;
-}
-
-void EvaluateRangeLowEntry()
-{
-   if(!IsSpreadOk())
-      return;
-   if((TimeCurrent() - lastEntryTime) < InpMinSecondsBetweenEntries)
-      return;
-   if(CountBotPositions(-1) > 0)
-      return;
-   if(CountBotPositions(-1) + 2 > InpMaxSimultaneousPositions)
-      return;
-   if(lastSwingLow <= 0.0)
-      return;
-
-   double rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower;
-   if(!GetIndicatorSnapshot(rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower))
-   {
-      LogDecision("No trade: indicator data not ready");
-      return;
-   }
-
-   if(atr < InpMinATR)
-   {
-      LogDecision(StringFormat("No trade: M15 ATR %.5f below minimum %.5f", atr, InpMinATR));
-      return;
-   }
-
-   double vwap = DailyVWAP();
-   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-   double mid = (bid + ask) * 0.5;
-   double swingLowBuffer = atr * InpSwingLowBufferATR;
-   bool nearSwingLow = MathAbs(mid - lastSwingLow) <= swingLowBuffer;
-   bool rsiOk = rsi <= InpRSIOversold;
-   bool stochCrossUp = stochK1 <= stochD1 && stochK0 > stochD0;
-   bool emaTurningUp = emaFast0 > emaFast1 && emaFast0 >= emaSlow0;
-   bool bullishM1 = M1BullishTrigger();
-   bool lowerBandTouch = !InpRequireLowerBandTouch || iLow(InpSymbol, PERIOD_M5, 1) <= bandLower + atr * InpBandTouchBufferATR;
-   bool vwapOk = !InpRequireVwapConfluence || (vwap > 0.0 && mid < vwap);
-
-   if(!(nearSwingLow && rsiOk && stochCrossUp && emaTurningUp && bullishM1 && lowerBandTouch && vwapOk))
-   {
-      LogDecision(StringFormat("No trade: low setup not met nearLow=%s RSI=%.2f stochCross=%s emaUp=%s M1Bull=%s lowerBB=%s vwap=%s",
-                               nearSwingLow ? "Y" : "N", rsi, stochCrossUp ? "Y" : "N", emaTurningUp ? "Y" : "N",
-                               bullishM1 ? "Y" : "N", lowerBandTouch ? "Y" : "N", vwapOk ? "Y" : "N"));
-      return;
-   }
-
-   double lot = CalculateLot(atr);
-   if(lot <= 0.0)
-   {
-      LogDecision("No trade: lot calculation failed");
-      return;
-   }
-
-   OpenMarketPair(lot, atr, rsi, stochK0, stochD0, emaFast0, emaSlow0, vwap, bandLower, bandUpper);
-}
-
-void EvaluateSwingHighAdd()
-{
-   if(!cycleActive)
-      return;
-   if(!IsSpreadOk())
-      return;
-   if(shortAddsThisCycle >= InpMaxShortAddsPerCycle)
-      return;
-   if(CountBotPositions(-1) >= InpMaxSimultaneousPositions)
-      return;
-   if(lastSwingHigh <= 0.0)
-      return;
-
-   double rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower;
-   if(!GetIndicatorSnapshot(rsi, stochK0, stochD0, stochK1, stochD1, emaFast0, emaFast1, emaSlow0, emaSlow1, atr, bandUpper, bandLower))
-      return;
-
-   if(atr < InpMinATR)
-      return;
-
-   double vwap = DailyVWAP();
-   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-   double mid = (bid + ask) * 0.5;
-   bool nearSwingHigh = MathAbs(mid - lastSwingHigh) <= atr * InpSwingHighBufferATR;
-   bool rsiApproach = rsi >= InpRSISwingHigh;
-   bool vwapConfluence = vwap > 0.0 && mid >= vwap;
-   bool upperBandConfluence = iHigh(InpSymbol, PERIOD_M5, 1) >= bandUpper - atr * InpBandTouchBufferATR;
-   bool confluenceOk = !InpRequireUpperBandAdd || (vwapConfluence && upperBandConfluence);
-   datetime currentM15 = iTime(InpSymbol, PERIOD_M15, 0);
-
-   if(!(nearSwingHigh && rsiApproach && confluenceOk) || currentM15 == lastSwingHighAddBar)
-      return;
-
-   CloseProfitableLongs();
-   double lot = CalculateLot(atr);
-   if(lot <= 0.0)
-      return;
-
-   string reason = StringFormat("M15 swing high add; RSI %.2f; VWAP=%s upperBB=%s", rsi, vwapConfluence ? "Y" : "N", upperBandConfluence ? "Y" : "N");
-   OpenSwingHighShort(lot, atr, rsi, stochK0, stochD0, emaFast0, emaSlow0, vwap, bandLower, bandUpper, reason);
+   IndicatorRelease(fractalsM1Handle);
+   IndicatorRelease(emaM5Handle);
+   IndicatorRelease(emaM1Handle);
+   IndicatorRelease(rsiM1Handle);
+   IndicatorRelease(atrM1Handle);
+   IndicatorRelease(adxM5Handle);
+   Comment("");
 }
 
 void OnTick()
 {
-   if(_Symbol != InpSymbol)
+   RefreshDayState();
+   RefreshConfirmedFractals();
+   double emaM5, emaM1, rsi, atr, adx;
+   if(!ReadBufferValue(emaM5Handle, 0, 1, emaM5) || !ReadBufferValue(emaM1Handle, 0, 1, emaM1)
+      || !ReadBufferValue(rsiM1Handle, 0, 1, rsi) || !ReadBufferValue(atrM1Handle, 0, 1, atr)
+      || !ReadBufferValue(adxM5Handle, 0, 1, adx))
       return;
-
-   RecalculateM15Swings(false);
-   CloseProfitableLongs();
-   ManageNetExit();
-
-   datetime m1Bar = iTime(InpSymbol, PERIOD_M1, 0);
-   if(m1Bar == 0 || m1Bar == lastM1BarTime)
+   ManageOpenPositions(atr);
+   MqlTick tick;
+   if(!SymbolInfoTick(InpSymbol, tick))
       return;
-   lastM1BarTime = m1Bar;
-
-   EvaluateSwingHighAdd();
-   EvaluateRangeLowEntry();
+   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+   double spread = (tick.ask - tick.bid) / point;
+   double m5Close = iClose(InpSymbol, PERIOD_M5, 1);
+   double m1Close = iClose(InpSymbol, PERIOD_M1, 1);
+   UpdateChartComment(spread, adx, rsi, atr, m5Close, emaM5);
+   if(spread > InpMaxSpreadPoints || atr < InpMinATR || adx < InpMinADX || !IsTradingSession(atr)
+      || !DailyLimitsAllowTrading() || TradesToday() >= InpMaxTradesPerDay || IsNearHighImpactNews())
+      return;
+   if(lastEntryTime > 0 && TimeCurrent() - lastEntryTime < InpMinMinutesBetweenTrades * 60)
+      return;
+   if(MathAbs(m5Close - emaM5) < atr * InpMinEMA200DistanceATR || latestBullishLow <= 0.0 || latestBearishHigh <= 0.0)
+      return;
+   bool canBuy = m5Close > emaM5 && m1Close > emaM1 && rsi >= InpRSIBuyMin && rsi <= InpRSIBuyMax
+                 && tick.ask > latestBearishHigh && lastBullishFractalTime > consumedBuySignalTime
+                 && CountOurPositions(POSITION_TYPE_SELL) == 0
+                 && (InpEnablePyramiding || CountOurPositions(POSITION_TYPE_BUY) == 0)
+                 && PassesM15StructureFilter(true, tick.ask, atr);
+   bool canSell = m5Close < emaM5 && m1Close < emaM1 && rsi >= InpRSISellMin && rsi <= InpRSISellMax
+                  && tick.bid < latestBullishLow && lastBearishFractalTime > consumedSellSignalTime
+                  && CountOurPositions(POSITION_TYPE_BUY) == 0
+                  && (InpEnablePyramiding || CountOurPositions(POSITION_TYPE_SELL) == 0)
+                  && PassesM15StructureFilter(false, tick.bid, atr);
+   if(canBuy && OpenTrade(true, atr))
+      consumedBuySignalTime = lastBullishFractalTime;
+   else if(canSell && OpenTrade(false, atr))
+      consumedSellSignalTime = lastBearishFractalTime;
 }
