@@ -1,5 +1,5 @@
 #property copyright "gold-trading-bot"
-#property version   "5.00"
+#property version   "5.10"
 #property strict
 #property description "XAUUSD M1 stop-grid breakout Expert Advisor. Backtest and demo test before live use. Choppy markets can trigger both sides and create drawdown."
 
@@ -18,8 +18,8 @@ input string          InpSymbol                              = "XAUUSD";
 input ulong           InpMagicNumber                         = 260531;
 input double          InpBaseLot                             = 0.01;
 input LotStepMode     InpLotStepMode                         = CustomArray;
-input string          InpCustomLots                          = "0.01,0.04,0.07,0.10";
-input double          InpMultiplier                          = 1.5;
+input string          InpCustomLots                          = "0.01,0.03,0.05,0.07,0.10";
+input double          InpMultiplier                          = 1.4;
 input double          InpGridSpacingDollars                  = 2.0;
 input int             InpGridLevels                          = 5;
 input int             InpPendingOrderExpiryMinutes           = 0;
@@ -32,6 +32,9 @@ input bool            InpUseBasketTP                         = true;
 input double          InpBasketProfitMoney                   = 25.0;
 input bool            InpUseBasketSL                         = true;
 input double          InpBasketLossMoney                     = 50.0;
+input bool            InpUseBasketTrailing                   = true;
+input double          InpBasketTrailStartMoney               = 15.0;
+input double          InpBasketTrailDistanceMoney            = 8.0;
 input bool            InpUseTrailingStop                     = true;
 input double          InpTrailingStartDollars                = 3.0;
 input double          InpTrailingDistanceDollars             = 2.0;
@@ -42,6 +45,7 @@ input int             InpMaxOpenTrades                       = 10;
 input int             InpMaxPendingOrders                    = 10;
 input double          InpMaxDailyLossMoney                   = 100.0;
 input double          InpMaxDailyProfitMoney                 = 100.0;
+input bool            InpCloseTradesOnDailyLoss              = true;
 input int             InpTradingStartHour                    = 0;
 input int             InpTradingEndHour                      = 24;
 input bool            InpAvoidRollover                       = true;
@@ -50,6 +54,23 @@ input int             InpRolloverEndHour                     = 1;
 input int             InpFridayCloseHour                     = 20;
 input bool            InpAllowNewGridAfterBasketClose        = true;
 
+input bool            InpUseTrendFilter                      = true;
+input ENUM_TIMEFRAMES InpTrendTimeframe                      = PERIOD_M5;
+input int             InpTrendEMAPeriod                      = 200;
+input bool            InpUseATRFilter                        = true;
+input ENUM_TIMEFRAMES InpATRTimeframe                        = PERIOD_M5;
+input int             InpATRPeriod                           = 14;
+input double          InpMinATR                              = 0.60;
+input double          InpMaxATR                              = 8.00;
+input bool            InpUseADXFilter                        = true;
+input ENUM_TIMEFRAMES InpADXTimeframe                        = PERIOD_M5;
+input int             InpADXPeriod                           = 14;
+input double          InpMinADX                              = 18.0;
+input bool            InpUseChopProtection                   = true;
+input int             InpMaxOppositeTriggers                 = 1;
+input int             InpChopLookbackMinutes                 = 30;
+input int             InpPauseAfterChopMinutes               = 60;
+
 #define MAX_CUSTOM_LOTS 64
 
 double   customLots[MAX_CUSTOM_LOTS];
@@ -57,6 +78,13 @@ int      customLotCount       = 0;
 datetime lastBarTime          = 0;
 datetime currentDayStart      = 0;
 bool     basketClosedThisRun  = false;
+double   basketPeakProfit     = 0.0;
+bool     basketTrailingActive = false;
+datetime chopPauseUntil       = 0;
+
+int      trendEmaHandle       = INVALID_HANDLE;
+int      atrHandle            = INVALID_HANDLE;
+int      adxHandle            = INVALID_HANDLE;
 
 // Converts the configured XAUUSD dollar distance into a broker price distance.
 // XAUUSD is quoted in USD per troy ounce, so a 2.00 dollar move is a 2.00 price move.
@@ -69,6 +97,24 @@ double DollarsToPriceDistance(const double dollars)
 double NormalizePrice(const double price)
 {
    return NormalizeDouble(price, (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS));
+}
+
+// Reads the latest closed-bar value from an indicator handle buffer.
+bool ReadIndicatorValue(const int handle, const int buffer, const int shift, double &value)
+{
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   double values[];
+   ArraySetAsSeries(values, true);
+   if(CopyBuffer(handle, buffer, shift, 1, values) != 1)
+   {
+      Print("CopyBuffer failed. Handle=", handle, ", buffer=", buffer, ", error=", GetLastError());
+      return false;
+   }
+
+   value = values[0];
+   return (value != EMPTY_VALUE);
 }
 
 // Normalizes a requested lot to broker min/max/step constraints.
@@ -329,6 +375,150 @@ bool IsDailyLimitReached()
    return false;
 }
 
+// Checks the EMA trend filter for a specific pending order side.
+bool IsTrendOK(const ENUM_ORDER_TYPE orderType)
+{
+   if(!InpUseTrendFilter)
+      return true;
+
+   double ema = 0.0;
+   if(!ReadIndicatorValue(trendEmaHandle, 0, 1, ema))
+   {
+      Print("Trend filter blocked trading because EMA data is unavailable.");
+      return false;
+   }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(InpSymbol, tick))
+      return false;
+
+   if(orderType == ORDER_TYPE_BUY_STOP)
+   {
+      bool ok = (tick.ask > ema);
+      if(!ok)
+         Print("Trend filter blocked Buy Stop grid. Ask=", tick.ask, ", EMA=", ema);
+      return ok;
+   }
+
+   if(orderType == ORDER_TYPE_SELL_STOP)
+   {
+      bool ok = (tick.bid < ema);
+      if(!ok)
+         Print("Trend filter blocked Sell Stop grid. Bid=", tick.bid, ", EMA=", ema);
+      return ok;
+   }
+
+   return false;
+}
+
+// Required no-argument trend helper; true means at least one grid side is aligned with EMA.
+bool IsTrendOK()
+{
+   return IsTrendOK(ORDER_TYPE_BUY_STOP) || IsTrendOK(ORDER_TYPE_SELL_STOP);
+}
+
+// Checks ATR regime: too-low ATR suggests chop, too-high ATR suggests spike/news/slippage risk.
+bool IsATROK()
+{
+   if(!InpUseATRFilter)
+      return true;
+
+   double atr = 0.0;
+   if(!ReadIndicatorValue(atrHandle, 0, 1, atr))
+   {
+      Print("ATR filter blocked trading because ATR data is unavailable.");
+      return false;
+   }
+
+   if(InpMinATR > 0.0 && atr < InpMinATR)
+   {
+      Print("ATR filter blocked trading. ATR=", DoubleToString(atr, 3), " below minimum=", DoubleToString(InpMinATR, 3));
+      return false;
+   }
+
+   if(InpMaxATR > 0.0 && atr > InpMaxATR)
+   {
+      Print("ATR filter blocked trading. ATR=", DoubleToString(atr, 3), " above maximum=", DoubleToString(InpMaxATR, 3));
+      return false;
+   }
+
+   return true;
+}
+
+// Checks ADX trend-strength filter before a new grid is opened.
+bool IsADXOK()
+{
+   if(!InpUseADXFilter)
+      return true;
+
+   double adx = 0.0;
+   if(!ReadIndicatorValue(adxHandle, 0, 1, adx))
+   {
+      Print("ADX filter blocked trading because ADX data is unavailable.");
+      return false;
+   }
+
+   if(adx < InpMinADX)
+   {
+      Print("ADX filter blocked trading. ADX=", DoubleToString(adx, 2), " below minimum=", DoubleToString(InpMinADX, 2));
+      return false;
+   }
+
+   return true;
+}
+
+// Detects recent two-sided stop-grid triggers and pauses new grids after whipsaw behavior.
+bool IsChoppyMarket()
+{
+   if(!InpUseChopProtection)
+      return false;
+
+   datetime now = TimeCurrent();
+   if(chopPauseUntil > now)
+   {
+      Print("Chop protection pause is active until ", TimeToString(chopPauseUntil));
+      return true;
+   }
+
+   if(InpChopLookbackMinutes <= 0 || InpMaxOppositeTriggers <= 0)
+      return false;
+
+   datetime fromTime = now - InpChopLookbackMinutes * 60;
+   if(!HistorySelect(fromTime, now))
+      return false;
+
+   int buyTriggers = 0;
+   int sellTriggers = 0;
+   for(int i = HistoryDealsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != InpSymbol)
+         continue;
+      if((ulong)HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber)
+         continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_IN)
+         continue;
+
+      ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket, DEAL_TYPE);
+      if(dealType == DEAL_TYPE_BUY)
+         ++buyTriggers;
+      else if(dealType == DEAL_TYPE_SELL)
+         ++sellTriggers;
+   }
+
+   int oppositeTriggers = MathMin(buyTriggers, sellTriggers);
+   if(oppositeTriggers >= InpMaxOppositeTriggers)
+   {
+      chopPauseUntil = now + InpPauseAfterChopMinutes * 60;
+      Print("Chop protection detected two-sided triggers. Buys=", buyTriggers, ", sells=", sellTriggers, ", pausing new grids until ", TimeToString(chopPauseUntil));
+      return true;
+   }
+
+   return false;
+}
+
 // Checks whether a pending order already exists at a level to avoid duplicate grid orders.
 bool PendingOrderExists(const ENUM_ORDER_TYPE type, const double price)
 {
@@ -415,7 +605,7 @@ void CloseAllPositions()
 // Builds a new symmetrical Buy Stop / Sell Stop grid above Ask and below Bid.
 void PlaceGrid()
 {
-   if(!IsSpreadOK() || !IsTradingTime() || IsRolloverTime() || IsDailyLimitReached())
+   if(!IsSpreadOK() || !IsTradingTime() || IsRolloverTime() || IsDailyLimitReached() || !IsATROK() || !IsADXOK() || IsChoppyMarket())
       return;
 
    int openCount = CountOpenPositions();
@@ -454,6 +644,14 @@ void PlaceGrid()
       expiration = TimeCurrent() + InpPendingOrderExpiryMinutes * 60;
    }
 
+   bool allowBuyGrid = IsTrendOK(ORDER_TYPE_BUY_STOP);
+   bool allowSellGrid = IsTrendOK(ORDER_TYPE_SELL_STOP);
+   if(!allowBuyGrid && !allowSellGrid)
+   {
+      Print("Trend filter blocked both grid sides. No grid placed.");
+      return;
+   }
+
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippagePoints);
 
@@ -484,7 +682,7 @@ void PlaceGrid()
          sellTP = NormalizePrice(sellPrice - tpDistance);
       }
 
-      if(CountPendingOrders() < InpMaxPendingOrders && !PendingOrderExists(ORDER_TYPE_BUY_STOP, buyPrice))
+      if(allowBuyGrid && CountPendingOrders() < InpMaxPendingOrders && !PendingOrderExists(ORDER_TYPE_BUY_STOP, buyPrice))
       {
          if(trade.BuyStop(lot, buyPrice, InpSymbol, buySL, buyTP, typeTime, expiration, "StopGrid Buy L" + IntegerToString(level)))
          {
@@ -501,7 +699,7 @@ void PlaceGrid()
          break;
       }
 
-      if(!PendingOrderExists(ORDER_TYPE_SELL_STOP, sellPrice))
+      if(allowSellGrid && !PendingOrderExists(ORDER_TYPE_SELL_STOP, sellPrice))
       {
          if(trade.SellStop(lot, sellPrice, InpSymbol, sellSL, sellTP, typeTime, expiration, "StopGrid Sell L" + IntegerToString(level)))
          {
@@ -624,6 +822,49 @@ void ManageTrailingStop()
    }
 }
 
+// Trails total basket profit after the basket reaches a configurable money threshold.
+void ManageBasketTrailing()
+{
+   if(!InpUseBasketTrailing)
+   {
+      basketTrailingActive = false;
+      basketPeakProfit = 0.0;
+      return;
+   }
+
+   if(CountOpenPositions() == 0)
+   {
+      basketTrailingActive = false;
+      basketPeakProfit = 0.0;
+      return;
+   }
+
+   double basketProfit = GetBasketProfit();
+   if(!basketTrailingActive)
+   {
+      if(InpBasketTrailStartMoney > 0.0 && basketProfit >= InpBasketTrailStartMoney)
+      {
+         basketTrailingActive = true;
+         basketPeakProfit = basketProfit;
+         Print("Basket trailing activated. Basket P/L=", DoubleToString(basketProfit, 2));
+      }
+      return;
+   }
+
+   if(basketProfit > basketPeakProfit)
+      basketPeakProfit = basketProfit;
+
+   if(InpBasketTrailDistanceMoney > 0.0 && basketProfit <= basketPeakProfit - InpBasketTrailDistanceMoney)
+   {
+      Print("Basket trailing stop hit. Basket P/L=", DoubleToString(basketProfit, 2), ", peak=", DoubleToString(basketPeakProfit, 2));
+      CloseAllPositions();
+      DeleteAllPendingOrders();
+      basketClosedThisRun = true;
+      basketTrailingActive = false;
+      basketPeakProfit = 0.0;
+   }
+}
+
 // Enforces basket-level TP/SL and daily limits, then performs position management.
 void ManageOpenRisk()
 {
@@ -655,10 +896,16 @@ void ManageOpenRisk()
       return;
    }
 
+   ManageBasketTrailing();
+   if(CountOpenPositions() == 0 && CountPendingOrders() == 0 && basketClosedThisRun)
+      return;
+
    if(IsDailyLimitReached())
    {
-      CloseAllPositions();
+      double dailyProfit = GetTodayRealizedProfit() + GetBasketProfit();
       DeleteAllPendingOrders();
+      if(dailyProfit >= MathAbs(InpMaxDailyProfitMoney) || (dailyProfit <= -MathAbs(InpMaxDailyLossMoney) && InpCloseTradesOnDailyLoss))
+         CloseAllPositions();
       return;
    }
 
@@ -729,6 +976,36 @@ int OnInit()
    if(!ParseCustomLots())
       return INIT_FAILED;
 
+   if(InpUseTrendFilter)
+   {
+      trendEmaHandle = iMA(InpSymbol, InpTrendTimeframe, InpTrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(trendEmaHandle == INVALID_HANDLE)
+      {
+         Print("Failed to create trend EMA handle. Error=", GetLastError());
+         return INIT_FAILED;
+      }
+   }
+
+   if(InpUseATRFilter)
+   {
+      atrHandle = iATR(InpSymbol, InpATRTimeframe, InpATRPeriod);
+      if(atrHandle == INVALID_HANDLE)
+      {
+         Print("Failed to create ATR handle. Error=", GetLastError());
+         return INIT_FAILED;
+      }
+   }
+
+   if(InpUseADXFilter)
+   {
+      adxHandle = iADX(InpSymbol, InpADXTimeframe, InpADXPeriod);
+      if(adxHandle == INVALID_HANDLE)
+      {
+         Print("Failed to create ADX handle. Error=", GetLastError());
+         return INIT_FAILED;
+      }
+   }
+
    lastBarTime = iTime(InpSymbol, PERIOD_M1, 0);
    EventSetTimer(10);
 
@@ -739,6 +1016,14 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+
+   if(trendEmaHandle != INVALID_HANDLE)
+      IndicatorRelease(trendEmaHandle);
+   if(atrHandle != INVALID_HANDLE)
+      IndicatorRelease(atrHandle);
+   if(adxHandle != INVALID_HANDLE)
+      IndicatorRelease(adxHandle);
+
    Print("Stop-grid breakout EA deinitialized. Reason=", reason);
 }
 
