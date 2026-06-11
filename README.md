@@ -1,64 +1,122 @@
-# GoldTradingBot v4.00 — XAUUSD Fractal Continuation Scalper
+# GoldTradingBot v5.10 — XAUUSD M1/M5 Stop-Grid Breakout EA
 
 ## Important
-This MT5 Expert Advisor is designed for **Strategy Tester backtesting and demo validation before live use**. Its filters aim to improve signal quality, but no algorithm can guarantee a win rate or profitability. Broker execution, symbol specifications, spread, slippage, data quality, session times, and market regime materially affect results.
+This MT5 Expert Advisor is designed for **Strategy Tester backtesting and demo validation before live use**. It is a breakout stop-grid strategy for XAUUSD M1/M5 and can lose quickly in adverse conditions. The main strategy risk is that choppy markets and news spikes can trigger multiple stop-grid levels quickly, sometimes on both sides, causing drawdown and slippage.
 
-## Strategy Overview
-`GoldTradingBot.mq5` is an M1-entry XAUUSD/GOLD scalper based on confirmed Williams Fractals and multi-timeframe trend continuation:
+## Improved EA Logic
+`GoldTradingBot.mq5` places a filtered stop grid around the current XAUUSD price:
 
-- **M1 entries:** confirmed Williams Fractals, EMA 50, RSI 14, ATR 14, and breakout execution.
-- **M5 trend confirmation:** EMA 200 and ADX 14.
-- **M15 structure filter:** avoids buys close to recent resistance and sells close to recent support.
-- **Execution safeguards:** spread, liquidity-session, trade-frequency, direction-exposure, daily P/L, and optional MT5 economic-calendar filters.
+- **Buy Stop orders** are placed above the current Ask when the optional EMA trend filter allows buys.
+- **Sell Stop orders** are placed below the current Bid when the optional EMA trend filter allows sells.
+- Grid levels use configurable fixed price spacing, where `2.00` means a `2.00` XAUUSD price move.
+- Lot size can be fixed, pulled from a conservative custom array, or multiplied by tier.
+- ATR and ADX filters avoid opening grids in very quiet chop, excessive spike volatility, or weak directional conditions.
+- If one side is triggered, the EA can delete the opposite pending stop orders.
+- Basket TP, basket SL, basket trailing profit, breakeven, per-position trailing, daily limits, spread limits, rollover avoidance, Friday close handling, and choppy-market pauses are included.
+- All order and position management is filtered by `InpSymbol` and `InpMagicNumber`, so manual trades and other EA trades are ignored.
 
-The EA uses only Williams Fractals starting at shift `2`. A fractal therefore has two completed bars to its right and is confirmed before it can be consumed as a signal.
+Example with price `2350.00`, spacing `2.00`, four levels, and custom lots `0.01,0.03,0.05,0.07`:
 
-## Entry Logic
-### Buy
-A buy requires all of the following:
-
-1. Last closed M5 candle is above EMA 200.
-2. Last closed M1 candle is above EMA 50.
-3. M5 ADX is at or above the configured minimum (default `20`).
-4. M1 RSI is within the buy range (default `45–70`).
-5. A confirmed bullish (lower) M1 fractal exists and has not already been consumed by a buy.
-6. Ask price breaks above the most recent confirmed bearish (upper) M1 fractal.
-7. ATR, spread, session, frequency, daily-limit, optional news, and optional M15 resistance filters pass.
-8. No EA sell is open. One EA buy is allowed unless pyramiding is enabled.
-
-### Sell
-The sell path is symmetrical: price must be below both EMAs, RSI must be within the sell range (default `30–55`), a fresh confirmed bearish fractal must exist, and bid must break below the latest confirmed bullish fractal while every safeguard passes.
-
-## Stops, Targets, and Position Management
-- Buy SL: latest confirmed bullish fractal low minus `InpATRStopBuffer × ATR`.
-- Sell SL: latest confirmed bearish fractal high plus `InpATRStopBuffer × ATR`.
-- Configurable minimum and maximum SL distances are expressed in symbol points.
-- Final server-side TP defaults to `1.5R`.
-- At `1R`, the EA optionally partially closes the configured volume percentage, moves SL to breakeven, and/or begins ATR trailing.
-- Optional opposite-fractal exit can close positions after a newly confirmed opposite fractal appears.
-- Position selection always checks both magic number and configured symbol.
-
-## Session and News Notes
-Session inputs use the **broker server time** visible to the EA. Defaults cover London (`07:00–12:00`) and New York (`12:30–17:00`). Asian trading is disabled by default and can be enabled only with a stronger ATR requirement.
-
-The optional news filter uses MT5's economic calendar for high-impact events affecting `InpNewsCurrency` (default `USD`). It is disabled by default because calendar availability can differ between terminals and tester environments. If enabled and calendar lookup fails, the EA blocks new entries for safety.
-
-## Installation and Backtesting
-1. Copy `GoldTradingBot.mq5` into `MQL5/Experts`.
-2. Compile it in MetaEditor.
-3. Attach it to an `XAUUSD` or broker-specific gold-symbol M1 chart. If needed, change `InpSymbol` to the broker's exact symbol.
-4. In Strategy Tester, select M1 and use real ticks with realistic spread and commissions.
-5. Validate symbol point size, tick value, stops level, lot step, session offsets, and input thresholds against the broker's contract.
-6. Run out-of-sample tests and demo-forward tests before considering live use.
+| Level | Buy Stop | Sell Stop | Lot |
+| --- | ---: | ---: | ---: |
+| 1 | 2352.00 | 2348.00 | 0.01 |
+| 2 | 2354.00 | 2346.00 | 0.03 |
+| 3 | 2356.00 | 2344.00 | 0.05 |
+| 4 | 2358.00 | 2342.00 | 0.07 |
 
 ## Key Inputs
-- **Sizing:** `InpLotMode`, `InpFixedLot`, `InpRiskPercent`, `InpMaxLot`.
-- **Indicators:** `InpM5EMA200Period`, `InpM1EMA50Period`, `InpRSIPeriod`, RSI bounds, `InpADXPeriod`, `InpMinADX`, `InpATRPeriod`, `InpMinATR`.
-- **Execution:** `InpATRStopBuffer`, SL point limits, `InpMaxSpreadPoints`, `InpMaxTradesPerDay`, `InpMinMinutesBetweenTrades`, `InpEnablePyramiding`.
-- **Daily limits:** `InpDailyLossLimitPercent`, `InpDailyProfitTargetPercent`.
-- **Sessions:** London, New York, and optional Asian server-time ranges.
-- **Accuracy filters:** M5 EMA distance, optional M15 structure filter, optional high-impact news filter.
-- **Management:** final TP RR, TP1 partial close, breakeven, ATR trailing, and opposite-fractal exit.
+- **Symbol/magic:** `InpSymbol`, `InpMagicNumber`.
+- **Grid:** `InpGridSpacingDollars`, `InpGridLevels`, `InpPendingOrderExpiryMinutes`.
+- **Lots:** `InpBaseLot`, `InpLotStepMode`, `InpCustomLots`, `InpMultiplier`.
+- **Per-order exits:** `InpStopLossDollars`, `InpTakeProfitDollars`.
+- **Basket exits:** `InpUseBasketTP`, `InpBasketProfitMoney`, `InpUseBasketSL`, `InpBasketLossMoney`.
+- **Basket trailing:** `InpUseBasketTrailing`, `InpBasketTrailStartMoney`, `InpBasketTrailDistanceMoney`.
+- **Position protection:** `InpUseTrailingStop`, `InpTrailingStartDollars`, `InpTrailingDistanceDollars`, `InpUseBreakEven`, `InpBreakEvenStartDollars`, `InpBreakEvenLockDollars`.
+- **Trend filter:** `InpUseTrendFilter`, `InpTrendTimeframe`, `InpTrendEMAPeriod`.
+- **ATR filter:** `InpUseATRFilter`, `InpATRTimeframe`, `InpATRPeriod`, `InpMinATR`, `InpMaxATR`.
+- **ADX filter:** `InpUseADXFilter`, `InpADXTimeframe`, `InpADXPeriod`, `InpMinADX`.
+- **Chop protection:** `InpUseChopProtection`, `InpMaxOppositeTriggers`, `InpChopLookbackMinutes`, `InpPauseAfterChopMinutes`.
+- **Safety:** `InpMaxSpreadPoints`, `InpSlippagePoints`, `InpMaxOpenTrades`, `InpMaxPendingOrders`, `InpMaxDailyLossMoney`, `InpMaxDailyProfitMoney`, `InpCloseTradesOnDailyLoss`.
+- **Time filters:** `InpTradingStartHour`, `InpTradingEndHour`, `InpAvoidRollover`, `InpRolloverStartHour`, `InpRolloverEndHour`, `InpFridayCloseHour`.
 
-## Chart Status
-The chart comment displays M5 trend direction, latest confirmed bullish and bearish fractal levels, spread, ADX, RSI, ATR, trades today, and the EA's current daily realized-plus-floating P/L.
+## Recommended Default Style
+Use a conservative configuration first:
+
+- Conservative custom lot progression, such as `0.01,0.03,0.05,0.07,0.10`.
+- `InpDeleteOppositePendingsAfterTrigger = true`.
+- `InpUseTrendFilter = true` with EMA 200 on M5 or M15.
+- `InpUseATRFilter = true` to avoid low-volatility chop and high-volatility news spikes.
+- `InpUseADXFilter = true` to require directional strength.
+- `InpUseBasketTP = true`, `InpUseBasketSL = true`, and `InpUseBasketTrailing = true`.
+- `InpAvoidRollover = true` and avoid Friday late trading.
+
+## Suggested XAUUSD M1 Starting Settings
+These are starting points only. Optimize and validate with your broker's spread, commissions, stop levels, tick value, and execution quality:
+
+- `InpGridSpacingDollars = 2.0` or `2.5`.
+- `InpGridLevels = 4` to `5`.
+- `InpCustomLots = "0.01,0.03,0.05,0.07,0.10"`.
+- `InpMaxOpenTrades = 5` to `6`.
+- `InpMaxPendingOrders = 8` to `10`.
+- `InpBasketProfitMoney = 20` to `40` per $10,000 test balance.
+- `InpBasketLossMoney = 50` to `80` per $10,000 test balance.
+- `InpBasketTrailStartMoney = 15` to `25`.
+- `InpBasketTrailDistanceMoney = 6` to `12`.
+- `InpTrendTimeframe = PERIOD_M5`, `InpTrendEMAPeriod = 200`.
+- `InpATRTimeframe = PERIOD_M5`, `InpMinATR = 0.60`, `InpMaxATR = 8.00`.
+- `InpADXTimeframe = PERIOD_M5`, `InpMinADX = 18` to `25`.
+- Trade liquid sessions only if your broker's rollover/spread behavior is poor.
+
+## Suggested XAUUSD M5 Starting Settings
+For M5, use slightly wider spacing and fewer levels to reduce whipsaw exposure:
+
+- `InpGridSpacingDollars = 2.5` to `4.0`.
+- `InpGridLevels = 3` to `5`.
+- `InpCustomLots = "0.01,0.02,0.04,0.06,0.08"` or `"0.01,0.03,0.05,0.07,0.10"`.
+- `InpBasketProfitMoney = 25` to `60` per $10,000 test balance.
+- `InpBasketLossMoney = 60` to `120` per $10,000 test balance.
+- `InpTrendTimeframe = PERIOD_M15` where possible.
+- `InpATRTimeframe = PERIOD_M15`, with optimized `InpMinATR` and `InpMaxATR` based on broker data.
+- `InpADXTimeframe = PERIOD_M15`, `InpMinADX = 18` to `28`.
+
+## Optimization Plan
+Optimize for quality, not just net profit. Rank parameter sets by:
+
+1. Profit Factor.
+2. Max equity drawdown.
+3. Recovery Factor.
+4. Expected Payoff.
+5. Smoothness of equity curve.
+6. Number of trades.
+
+Optimize these inputs first:
+
+- Grid spacing: `1.5`, `2.0`, `2.5`, `3.0`, `4.0`.
+- Grid levels: `3` to `7`.
+- Conservative custom lot arrays.
+- Basket TP and basket SL.
+- Basket trailing start and distance.
+- Per-position trailing start and distance.
+- ATR minimum and maximum.
+- ADX minimum.
+- Trading hours.
+- Rollover avoidance window.
+
+Avoid any setting that has:
+
+- Profit Factor below `1.30`.
+- Equity drawdown above `10%`.
+- Very low trade count.
+- One or two lucky profit spikes.
+- Huge lot exposure.
+- High sensitivity to spread or slippage.
+
+## Backtesting Properly
+1. Copy `GoldTradingBot.mq5` into `MQL5/Experts` and compile in MetaEditor.
+2. Attach or test it on the broker's exact gold symbol, for example `XAUUSD`, `GOLD`, or `XAUUSDm`, and update `InpSymbol` accordingly.
+3. In Strategy Tester, use **Every tick based on real ticks** with 100% history quality where possible.
+4. Include realistic commission, swap, and execution assumptions.
+5. Test with realistic spread or variable real-tick spread, then repeat with intentionally worse spread to check sensitivity.
+6. Use realistic slippage assumptions through `InpSlippagePoints`; then stress-test higher values.
+7. Run in-sample and out-of-sample tests, then demo-forward test before considering live use.
+8. Do not accept settings that only improve net profit by increasing exposure or relying on rare lucky spikes.
